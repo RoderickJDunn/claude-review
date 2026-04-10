@@ -31,12 +31,14 @@ The `--file` flag is documented as relative to the project directory, but nothin
 
 ### Fix
 
-Before building the URL, normalize `filePath` to be relative to `projectDir`:
+Before building the URL, normalize `filePath` to be relative to `projectDir` using `filepath.Rel`, which correctly handles `..`, `.`, trailing slashes, and symlinks:
 
 ```go
-if filepath.IsAbs(*filePath) && strings.HasPrefix(*filePath, *projectDir) {
-    *filePath = strings.TrimPrefix(*filePath, *projectDir)
-    *filePath = strings.TrimPrefix(*filePath, "/")
+if filepath.IsAbs(*filePath) {
+    rel, err := filepath.Rel(*projectDir, *filePath)
+    if err == nil && !strings.HasPrefix(rel, "..") {
+        *filePath = rel
+    }
 }
 ```
 
@@ -60,9 +62,9 @@ Built on page load by scanning `#markdown-content` for block-level elements. Eac
 }
 ```
 
-**Block elements:** `p`, `h1`-`h6`, `li`, `pre`, `tr`, `blockquote`.
+**Block elements:** `p`, `h1`-`h6`, `li`, `pre`, `td`, `blockquote`. Tables are navigated cell-by-cell (`td`), not row-by-row.
 
-**Rebuilding:** Full rebuild on page load and `file_updated` SSE events. `ResizeObserver` refreshes `rect` values without full rebuild.
+**Rebuilding:** Full rebuild on page load (which also covers `file_updated` SSE events, since those trigger a full page reload via `window.location.reload()`). `ResizeObserver` refreshes `rect` values on window resize without full rebuild.
 
 ### Word-Level Cursor
 
@@ -83,7 +85,7 @@ The cursor tracks `{textNode, wordStart, wordEnd}` within the current block.
 
 - Any arrow key activates keyboard nav if not active
 - Mouse click deactivates it
-- `Escape` from a comment popup returns to keyboard nav at the previous position
+- `Escape` from a comment popup returns to keyboard nav at the previous position (note: existing `hideCommentPopup` has no `Escape` handler — one must be added as part of this work)
 
 ## Feature 3: Selection Expansion & Commenting
 
@@ -95,9 +97,11 @@ Starting from the cursor word, `]` expands and `[` shrinks:
 |-------|-------|-----------------|
 | 0 | Word | Current cursor position |
 | 1 | Clause | Expand to nearest `, ; : — - ( )` delimiter |
-| 2 | Sentence | Expand to `. ? !` + whitespace/end-of-block (handles abbreviations) |
+| 2 | Sentence | Expand to `. ? !` + whitespace/end-of-block (see sentence boundary heuristic below) |
 | 3 | Paragraph | Entire current block element |
-| 4 | Section | Nearest preceding heading through all blocks until next heading of same or higher level |
+| 4 | Section | Nearest preceding heading through all blocks until next heading of same or higher level (if cursor is before any heading, expands from document start to the first heading) |
+
+**Sentence boundary heuristic:** A period, question mark, or exclamation mark is a sentence boundary when followed by whitespace + a capital letter, or end of block. Single-letter capitals after periods are not boundaries (handles "U.S.", "Dr. Smith"). This is a simple heuristic — not a full NLP sentence tokenizer. Good enough for review documents.
 
 **Behavior:**
 - `]` at level 4 does nothing. `[` at level 0 does nothing.
@@ -116,7 +120,8 @@ Context-sensitive bridge between navigation and comment modes:
 
 **On existing comment text (level 0, cursor on a `.comment-highlight` span):**
 - Scrolls comment panel to the relevant thread
-- Opens the comment for editing
+- If root comment has no replies: opens for editing
+- If root comment has replies: opens a reply textarea (consistent with existing click behavior that prevents editing root comments with replies)
 - Focus moves to textarea
 - `Escape`/submit returns to keyboard nav
 
@@ -147,7 +152,31 @@ Split the current monolithic `viewer.js` into focused modules:
 | `selection.js` | Expansion/shrinking, clause/sentence/paragraph/section detection | ~200 |
 | `keyboard-comments.js` | `c` handler, context detection, panel scroll sync | ~150 |
 
-**Module communication:** Separate `<script>` tags (no build step). Shared state via `window.crNav` object containing cursor position, block index, and selection state.
+**Module communication:** Separate `<script>` tags (no build step). Shared state via `window.crNav`:
+
+```
+window.crNav = {
+  // Block index (written by keyboard-nav, read by all)
+  blocks: [{element, lineStart, lineEnd, rect, headingLevel}],
+  currentBlockIndex: number,
+
+  // Cursor (written by keyboard-nav, read by selection + keyboard-comments)
+  cursor: {textNode, wordStart, wordEnd} | null,
+  targetX: number | null,        // persisted X for up/down movement
+  active: boolean,                // whether keyboard nav mode is on
+
+  // Selection (written by selection, read by keyboard-comments)
+  selection: {
+    level: 0-4,
+    range: Range | null,         // browser Range for the current selection
+    lineStart: number,
+    lineEnd: number,
+    text: string
+  }
+}
+```
+
+**Script load order in viewer.html:** `viewer.js` (initializes DOM, comments, SSE) → `keyboard-nav.js` → `selection.js` → `keyboard-comments.js`. All use `defer`.
 
 **No ES modules:** The project has no build tooling. Separate scripts + shared window state keeps it that way.
 
