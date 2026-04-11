@@ -202,6 +202,22 @@ func TestE2E_CLI_Review(t *testing.T) {
 		assert.Contains(t, output, "test.md")
 	})
 
+	t.Run("review normalizes absolute file path to relative", func(t *testing.T) {
+		absFile := filepath.Join(env.ProjectDir, "test.md")
+		output, err := env.runCLI(t, "review", "--file", absFile, "--project", env.ProjectDir)
+		require.NoError(t, err)
+		assert.Contains(t, output, "Open this URL")
+		// URL should contain the full project directory path only once, not doubled
+		urlStart := strings.Index(output, "http://")
+		urlLine := output[urlStart:]
+		urlEnd := strings.Index(urlLine, "\n")
+		if urlEnd > 0 {
+			urlLine = urlLine[:urlEnd]
+		}
+		projectDirCount := strings.Count(urlLine, env.ProjectDir)
+		assert.Equal(t, 1, projectDirCount, "Project directory should appear exactly once in URL, got: %s", urlLine)
+	})
+
 	t.Run("review strips @ prefix from file path", func(t *testing.T) {
 		output, err := env.runCLI(t, "review", "--file", "@simple.md", "--project", env.ProjectDir)
 		require.NoError(t, err)

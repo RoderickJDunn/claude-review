@@ -8,6 +8,85 @@
     let commentPopup = null;
     let commentPanel = null;
 
+    // Initialize shared navigation state
+    window.crNav = {
+        blocks: [],
+        currentBlockIndex: 0,
+        cursor: null,
+        targetX: null,
+        active: false,
+        paneFocus: false,       // true when comment pane has focus
+        paneCommentIndex: -1,   // index into root comments in pane
+        selection: {
+            level: 0,
+            range: null,
+            lineStart: null,
+            lineEnd: null,
+            text: '',
+        },
+    };
+
+    function showConfirmDialog(message) {
+        return new Promise((resolve) => {
+            const overlay = document.createElement('div');
+            overlay.id = 'confirm-dialog-overlay';
+
+            const dialog = document.createElement('div');
+            dialog.id = 'confirm-dialog';
+
+            const msg = document.createElement('p');
+            msg.textContent = message;
+            dialog.appendChild(msg);
+
+            const buttons = document.createElement('div');
+            buttons.className = 'confirm-dialog-buttons';
+
+            const cancelBtn = document.createElement('button');
+            cancelBtn.className = 'comment-btn';
+            cancelBtn.textContent = 'Cancel';
+
+            const confirmBtn = document.createElement('button');
+            confirmBtn.className = 'comment-btn comment-btn-primary';
+            confirmBtn.textContent = 'Confirm';
+
+            buttons.appendChild(cancelBtn);
+            buttons.appendChild(confirmBtn);
+            dialog.appendChild(buttons);
+
+            const hint = document.createElement('div');
+            hint.className = 'confirm-dialog-hint';
+            hint.textContent = 'Enter to confirm · Escape to cancel';
+            dialog.appendChild(hint);
+
+            overlay.appendChild(dialog);
+            document.body.appendChild(overlay);
+            confirmBtn.focus();
+
+            function cleanup(result) {
+                document.removeEventListener('keydown', onKey);
+                overlay.remove();
+                resolve(result);
+            }
+
+            function onKey(e) {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    cleanup(true);
+                } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    cleanup(false);
+                }
+            }
+
+            document.addEventListener('keydown', onKey);
+            cancelBtn.addEventListener('click', () => cleanup(false));
+            confirmBtn.addEventListener('click', () => cleanup(true));
+            overlay.addEventListener('click', (e) => {
+                if (e.target === overlay) cleanup(false);
+            });
+        });
+    }
+
     // Initialize when DOM is ready
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', init);
@@ -22,6 +101,21 @@
         createCommentPanel();
         loadExistingComments();
         setupSSE();
+
+        // Expose functions for keyboard modules
+        window.crViewer = {
+            showCommentPopup,
+            showEditCommentPopup,
+            showReplyPopup,
+            hideCommentPopup,
+            updateCommentPanel,
+            extractLineNumbersFromRange,
+            commentHasReplies,
+            getComments: () => comments,
+            getRootThreadContainers: () => Array.from(document.querySelectorAll('.thread-container')),
+            getCurrentSelection: () => currentSelection,
+            setCurrentSelection: (sel) => { currentSelection = sel; },
+        };
     }
 
     function initTextSelection() {
@@ -171,6 +265,7 @@
     }
 
     function updateCommentPanel() {
+        addCommentMarginIndicators();
         if (!commentPanel) return;
 
         const listContainer = commentPanel.querySelector('.comment-panel-list');
@@ -263,6 +358,24 @@
                 statusDot.className = 'comment-status-dot';
                 statusDot.title = 'Awaiting your response';
                 badgesDiv.appendChild(statusDot);
+            }
+
+            // Add edit button for root comments without replies
+            if (replyCount === 0) {
+                const editBtn = document.createElement('button');
+                editBtn.className = 'comment-badge-btn comment-badge-edit';
+                editBtn.textContent = 'Edit';
+                editBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const highlight = document.querySelector(`.comment-highlight[data-comment-id="${comment.id}"]`);
+                    if (highlight) {
+                        highlight.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        // Position popup near the panel
+                        const rect = commentPanel.getBoundingClientRect();
+                        showEditCommentPopup(comment, highlight, rect.left - 520, rect.top + 40);
+                    }
+                });
+                badgesDiv.appendChild(editBtn);
             }
 
             // Add reply button as badge
@@ -418,7 +531,7 @@
         `;
         document.body.appendChild(commentPopup);
 
-        // Add keyboard handler for textarea (Enter to submit, Shift+Enter for newline)
+        // Add keyboard handler for textarea (Enter to submit, Shift+Enter for newline, Escape to cancel)
         const textarea = document.getElementById('comment-text');
         textarea.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
@@ -427,6 +540,9 @@
                 if (saveBtn) {
                     saveBtn.click();
                 }
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                hideCommentPopup();
             }
         });
 
@@ -588,7 +704,7 @@
     }
 
     async function handleResolveThread(rootComment) {
-        if (!confirm('Are you sure you want to resolve this thread?')) {
+        if (!(await showConfirmDialog('Resolve this thread?'))) {
             return;
         }
 
@@ -777,7 +893,7 @@
      * Handle deleting a comment
      */
     async function handleDeleteComment(comment, highlightElement) {
-        if (!confirm('Are you sure you want to delete this comment?')) {
+        if (!(await showConfirmDialog('Delete this comment?'))) {
             return;
         }
 
@@ -893,6 +1009,36 @@
 
         // Update comment panel after loading all comments
         updateCommentPanel();
+    }
+
+    function addCommentMarginIndicators() {
+        // Remove existing indicators
+        document.querySelectorAll('.comment-margin-indicator').forEach(el => el.remove());
+
+        const highlights = document.querySelectorAll('.comment-highlight');
+        const processedBlocks = new Set();
+
+        highlights.forEach(highlight => {
+            // Find the containing block element (p, li, h1-h6, etc.)
+            const block = highlight.closest('[data-line-start]');
+            if (!block || processedBlocks.has(block)) return;
+            processedBlocks.add(block);
+
+            // Count comments in this block
+            const commentIds = new Set();
+            block.querySelectorAll('.comment-highlight').forEach(h => {
+                commentIds.add(h.dataset.commentId);
+            });
+
+            block.style.position = 'relative';
+            const indicator = document.createElement('div');
+            indicator.className = 'comment-margin-indicator';
+            indicator.title = `${commentIds.size} comment${commentIds.size > 1 ? 's' : ''}`;
+            if (commentIds.size > 1) {
+                indicator.dataset.count = commentIds.size;
+            }
+            block.appendChild(indicator);
+        });
     }
 
     /**

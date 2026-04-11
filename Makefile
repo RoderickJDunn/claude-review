@@ -63,4 +63,7 @@ release-major:
 	./release.sh major
 
 install: build
+	mkdir -p $(HOME)/.local/bin
+	cp ./${CR_BUILD_ARTIFACTS_DIR}/${CR_EXECUTABLE_FILENAME} $(HOME)/.local/bin/${CR_EXECUTABLE_FILENAME}
+	codesign --force --sign - $(HOME)/.local/bin/${CR_EXECUTABLE_FILENAME}
 	./${CR_BUILD_ARTIFACTS_DIR}/${CR_EXECUTABLE_FILENAME} install

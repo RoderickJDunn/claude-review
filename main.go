@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -233,6 +234,11 @@ func runReview() {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
 
+	// Resolve absolute file path against registered projects
+	if filepath.IsAbs(*filePath) {
+		*projectDir, *filePath = resolveFileToProject(*filePath, *projectDir)
+	}
+
 	_, err := createProject(*projectDir)
 	if err != nil {
 		log.Fatalf("Failed to register project: %v", err)
@@ -282,6 +288,11 @@ func runAddress() {
 	// Initialize database
 	if err := initDB(); err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
+	}
+
+	// Resolve absolute file path against registered projects
+	if filepath.IsAbs(*filePath) {
+		*projectDir, *filePath = resolveFileToProject(*filePath, *projectDir)
 	}
 
 	// Debug: show what we're searching for
@@ -504,6 +515,11 @@ func runResolve() {
 	// Remove @ prefix if present
 	*filePath = strings.TrimPrefix(*filePath, "@")
 
+	// Resolve absolute file path against registered projects
+	if filepath.IsAbs(*filePath) {
+		*projectDir, *filePath = resolveFileToProject(*filePath, *projectDir)
+	}
+
 	// Debug: show what we're searching for
 	log.Printf("Searching for comments: project_directory=%q, file_path=%q", *projectDir, *filePath)
 
@@ -544,6 +560,38 @@ func runUninstall() {
 
 func runVersion() {
 	fmt.Println(Version)
+}
+
+// resolveFileToProject takes an absolute file path and resolves it against
+// registered projects in the database. It returns the matching project directory
+// and the file path relative to that project. If no registered project contains
+// the file, it falls back to using the provided default project directory and
+// relativizes against that.
+func resolveFileToProject(absFilePath, defaultProjectDir string) (projectDir, relFilePath string) {
+	projects, err := getAllProjects()
+	if err == nil {
+		// Sort by path length descending to match the most specific project first
+		for i := 0; i < len(projects); i++ {
+			for j := i + 1; j < len(projects); j++ {
+				if len(projects[j].Directory) > len(projects[i].Directory) {
+					projects[i], projects[j] = projects[j], projects[i]
+				}
+			}
+		}
+		for _, p := range projects {
+			rel, err := filepath.Rel(p.Directory, absFilePath)
+			if err == nil && !strings.HasPrefix(rel, "..") {
+				return p.Directory, rel
+			}
+		}
+	}
+
+	// Fallback: relativize against the default project directory
+	rel, err := filepath.Rel(defaultProjectDir, absFilePath)
+	if err == nil && !strings.HasPrefix(rel, "..") {
+		return defaultProjectDir, rel
+	}
+	return defaultProjectDir, absFilePath
 }
 
 func capitalizeFirst(s string) string {

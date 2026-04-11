@@ -484,8 +484,11 @@ func TestE2E_WebInterface_FileViewer(t *testing.T) {
 	assert.Contains(t, bodyStr, "data-line-start", "Should have line number attributes")
 	assert.Contains(t, bodyStr, "data-line-end", "Should have line number attributes")
 
-	// Check viewer.js is loaded
+	// Check all JS modules are loaded
 	assert.Contains(t, bodyStr, "viewer.js")
+	assert.Contains(t, bodyStr, "keyboard-nav.js")
+	assert.Contains(t, bodyStr, "selection.js")
+	assert.Contains(t, bodyStr, "keyboard-comments.js")
 }
 
 func TestE2E_WebInterface_DirectoryListing(t *testing.T) {
