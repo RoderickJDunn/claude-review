@@ -61,6 +61,10 @@
         const toolbar = document.getElementById('editor-toolbar');
         if (!content || !toolbar) return;
 
+        // Capture nav cursor position before deactivating
+        const nav = window.crNav;
+        const savedCursor = nav.cursor ? { textNode: nav.cursor.textNode, wordStart: nav.cursor.wordStart } : null;
+
         // Fetch raw markdown
         try {
             const params = new URLSearchParams({
@@ -77,20 +81,44 @@
 
         mode = 'rich';
         isDirty = false;
-        window.crNav.editMode = true;
+        nav.editMode = true;
 
         // Deactivate keyboard nav
         if (window.crNavUtils) window.crNavUtils.deactivate();
 
         // Enable contenteditable
         content.setAttribute('contenteditable', 'true');
-        content.focus();
+
+        // Place caret at the nav cursor position (or start of content)
+        placeCaret(content, savedCursor);
 
         // Show toolbar
         toolbar.style.display = 'flex';
 
         // Track changes
         content.addEventListener('input', onContentInput);
+    }
+
+    function placeCaret(content, savedCursor) {
+        const sel = window.getSelection();
+        if (!sel) { content.focus(); return; }
+
+        if (savedCursor && savedCursor.textNode && content.contains(savedCursor.textNode)) {
+            try {
+                const range = document.createRange();
+                range.setStart(savedCursor.textNode, savedCursor.wordStart);
+                range.collapse(true);
+                sel.removeAllRanges();
+                sel.addRange(range);
+                // Scroll the cursor into view
+                savedCursor.textNode.parentElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                return;
+            } catch (e) {
+                // Fall through to default
+            }
+        }
+
+        content.focus();
     }
 
     function onContentInput() {
@@ -186,39 +214,20 @@
         }
     }
 
-    async function exitEditMode(reload) {
-        if (isDirty && !reload) {
+    async function exitEditMode(saved) {
+        if (isDirty && !saved) {
             // Use the custom confirm dialog from viewer.js if available
             const confirmFn = window.showConfirmDialog || window.confirm;
             const confirmed = await confirmFn('Discard unsaved changes?');
             if (!confirmed) return;
         }
 
-        const content = document.getElementById('markdown-content');
-        const textarea = document.getElementById('editor-raw-textarea');
-        const toolbar = document.getElementById('editor-toolbar');
-        const rawToggle = document.getElementById('editor-raw-toggle');
-
-        if (content) {
-            content.removeAttribute('contenteditable');
-            content.removeEventListener('input', onContentInput);
-            content.style.display = '';
-        }
-
-        if (textarea) {
-            textarea.removeEventListener('input', onContentInput);
-            textarea.style.display = 'none';
-        }
-
-        if (toolbar) toolbar.style.display = 'none';
-        if (rawToggle) rawToggle.textContent = 'Raw';
-
         mode = 'off';
         isDirty = false;
         window.crNav.editMode = false;
 
-        if (reload) {
-            window.location.reload();
-        }
+        // Always reload to restore clean DOM (contenteditable can damage
+        // comment highlight spans and other DOM structures)
+        window.location.reload();
     }
 })();
