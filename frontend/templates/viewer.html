@@ -15,7 +15,16 @@
             <span>{{.FilePath}}</span>
         </div>
 
+        <div id="editor-toolbar" style="display: none;">
+            <span class="editor-mode-label">Edit Mode</span>
+            <button id="editor-raw-toggle" class="comment-btn">Raw</button>
+            <button id="editor-save-btn" class="comment-btn comment-btn-primary">Save</button>
+            <button id="editor-cancel-btn" class="comment-btn">Cancel</button>
+            <span class="editor-hint">Cmd+S to save · Escape to cancel</span>
+        </div>
+
         <div id="markdown-content">{{.HTMLContent}}</div>
+        <textarea id="editor-raw-textarea" style="display: none;" spellcheck="false"></textarea>
 
         <!-- Comment panel (created in HTML to avoid blink on load) -->
         <div id="comment-panel" class="expanded ready">
@@ -74,5 +83,7 @@
         <script defer src="/static/keyboard-nav.js"></script>
         <script defer src="/static/selection.js"></script>
         <script defer src="/static/keyboard-comments.js"></script>
+        <script defer src="/static/vendor/turndown.js"></script>
+        <script defer src="/static/editor.js"></script>
     </body>
 </html>

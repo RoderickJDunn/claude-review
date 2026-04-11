@@ -84,6 +84,9 @@
 
     function setupKeyboardListeners() {
         document.addEventListener('keydown', (e) => {
+            // Don't capture when in editor mode - let browser handle natively
+            if (window.crNav.editMode) return;
+
             // Don't capture when typing in an input
             if (isInputFocused()) return;
 
@@ -166,6 +169,9 @@
         if (!content) return;
 
         content.addEventListener('click', (e) => {
+            // Don't interfere during editor mode - let browser handle clicks natively
+            if (window.crNav.editMode) return;
+
             // Don't interfere with comment highlights or popups
             if (e.target.closest('.comment-highlight')) return;
             if (e.target.closest('#comment-popup')) return;
@@ -236,6 +242,7 @@
         // Deactivate on clicks outside markdown content
         document.addEventListener('mousedown', (e) => {
             const nav = window.crNav;
+            if (nav.editMode) return;
             if (!nav.active) return;
 
             // Don't deactivate if clicking in markdown content (handled by click-to-jump),

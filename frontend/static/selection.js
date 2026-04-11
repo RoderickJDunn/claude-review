@@ -17,6 +17,7 @@
     }
 
     function handleSelectionKeys(e) {
+        if (window.crNav.editMode) return;
         if (window.crNavUtils && window.crNavUtils.isInputFocused()) return;
 
         const nav = window.crNav;

@@ -141,6 +141,8 @@ func runServer() {
 	r.Delete("/api/comments/{id}", handleDeleteComment)
 	r.Get("/api/events", handleSSE)
 	r.Post("/api/events", handleBroadcast)
+	r.Get("/api/content", handleGetContent)
+	r.Put("/api/content", handleSaveContent)
 
 	// Static files from embedded FS
 	staticSubFS, err := fs.Sub(staticFS, "frontend/static")

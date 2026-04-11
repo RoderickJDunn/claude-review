@@ -30,6 +30,7 @@
         const content = document.getElementById('markdown-content');
         if (content) {
             content.addEventListener('click', () => {
+                if (window.crNav.editMode) return;
                 exitPaneMode();
             });
         }
@@ -107,6 +108,7 @@
     }
 
     function handlePaneNav(e) {
+        if (window.crNav.editMode) return;
         if (window.crNavUtils && window.crNavUtils.isInputFocused()) return;
 
         const nav = window.crNav;
@@ -153,6 +155,7 @@
     }
 
     function handleCommentKey(e) {
+        if (window.crNav.editMode) return;
         if (window.crNavUtils && window.crNavUtils.isInputFocused()) return;
         if (e.key !== 'c' && e.key !== 's') return;
 

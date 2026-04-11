@@ -15,6 +15,7 @@
         cursor: null,
         targetX: null,
         active: false,
+        editMode: false,        // true when editor is active
         paneFocus: false,       // true when comment pane has focus
         paneCommentIndex: -1,   // index into root comments in pane
         selection: {
@@ -116,6 +117,9 @@
             getCurrentSelection: () => currentSelection,
             setCurrentSelection: (sel) => { currentSelection = sel; },
         };
+
+        // Expose confirm dialog globally for editor.js
+        window.showConfirmDialog = showConfirmDialog;
     }
 
     function initTextSelection() {
@@ -1149,6 +1153,7 @@
      * Trigger a page reload
      */
     function triggerReload() {
+        if (window.crNav.editMode) return;
         window.location.reload();
     }
 

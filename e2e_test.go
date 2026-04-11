@@ -275,6 +275,22 @@ func (env *TestEnv) patchJSON(t *testing.T, path string, data interface{}) *http
 	return resp
 }
 
+func (env *TestEnv) putJSON(t *testing.T, path string, data interface{}) *http.Response {
+	t.Helper()
+
+	jsonData, err := json.Marshal(data)
+	require.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodPut, env.BaseURL+path, bytes.NewReader(jsonData))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+
+	return resp
+}
+
 func (env *TestEnv) delete(t *testing.T, path string) *http.Response {
 	t.Helper()
 

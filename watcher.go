@@ -9,10 +9,11 @@ import (
 )
 
 type FileWatcher struct {
-	watcher   *fsnotify.Watcher
-	watches   map[string]bool // Track watched files
-	mu        sync.RWMutex
-	callbacks map[string]func() // Callbacks per file path
+	watcher      *fsnotify.Watcher
+	watches      map[string]bool   // Track watched files
+	mu           sync.RWMutex
+	callbacks    map[string]func() // Callbacks per file path
+	suppressNext map[string]bool   // One-shot reload suppression per file
 }
 
 var fileWatcher *FileWatcher
@@ -24,15 +25,22 @@ func initFileWatcher() error {
 	}
 
 	fileWatcher = &FileWatcher{
-		watcher:   watcher,
-		watches:   make(map[string]bool),
-		callbacks: make(map[string]func()),
+		watcher:      watcher,
+		watches:      make(map[string]bool),
+		callbacks:    make(map[string]func()),
+		suppressNext: make(map[string]bool),
 	}
 
 	// Start event processing in background
 	go fileWatcher.processEvents()
 
 	return nil
+}
+
+func (fw *FileWatcher) SuppressNext(absPath string) {
+	fw.mu.Lock()
+	defer fw.mu.Unlock()
+	fw.suppressNext[absPath] = true
 }
 
 func (fw *FileWatcher) processEvents() {
@@ -45,6 +53,15 @@ func (fw *FileWatcher) processEvents() {
 
 			// Only care about write/create events
 			if event.Op&fsnotify.Write == fsnotify.Write || event.Op&fsnotify.Create == fsnotify.Create {
+				// Check one-shot suppression (e.g., our own save)
+				fw.mu.Lock()
+				if fw.suppressNext[event.Name] {
+					delete(fw.suppressNext, event.Name)
+					fw.mu.Unlock()
+					continue
+				}
+				fw.mu.Unlock()
+
 				fw.mu.RLock()
 				callback, exists := fw.callbacks[event.Name]
 				fw.mu.RUnlock()

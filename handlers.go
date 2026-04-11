@@ -472,3 +472,94 @@ func handleResolveThread(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
+
+func validateContentPath(projectDir, filePath string) (string, error) {
+	projects, err := getAllProjects()
+	if err != nil {
+		return "", fmt.Errorf("failed to get projects: %w", err)
+	}
+
+	found := false
+	for _, p := range projects {
+		if p.Directory == projectDir {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return "", fmt.Errorf("project not registered: %s", projectDir)
+	}
+
+	absPath := filepath.Clean(filepath.Join(projectDir, filePath))
+	if !strings.HasPrefix(absPath, filepath.Clean(projectDir)+string(filepath.Separator)) {
+		return "", fmt.Errorf("path traversal rejected")
+	}
+
+	return absPath, nil
+}
+
+func handleGetContent(w http.ResponseWriter, r *http.Request) {
+	projectDir := r.URL.Query().Get("project_directory")
+	filePath := r.URL.Query().Get("file_path")
+
+	if projectDir == "" || filePath == "" {
+		http.Error(w, "project_directory and file_path are required", http.StatusBadRequest)
+		return
+	}
+
+	absPath, err := validateContentPath(projectDir, filePath)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	content, err := os.ReadFile(absPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			http.Error(w, "file not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write(content)
+}
+
+func handleSaveContent(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ProjectDirectory string `json:"project_directory"`
+		FilePath         string `json:"file_path"`
+		Content          string `json:"content"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.ProjectDirectory == "" || req.FilePath == "" {
+		http.Error(w, "project_directory and file_path are required", http.StatusBadRequest)
+		return
+	}
+
+	absPath, err := validateContentPath(req.ProjectDirectory, req.FilePath)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Suppress the file watcher reload for our own save
+	if fileWatcher != nil {
+		fileWatcher.SuppressNext(absPath)
+	}
+
+	if err := os.WriteFile(absPath, []byte(req.Content), 0644); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "saved"})
+}
