@@ -3,8 +3,20 @@
 (function () {
     'use strict';
 
-    const CLAUSE_DELIMITERS = /[,;:()\u2014\-]/;
+    const CLAUSE_DELIMITERS = /[,;:()\u2014]/;
     const MAX_LEVEL = 4;
+
+    // Hyphen counts as a clause delimiter only when surrounded by whitespace
+    // (e.g. "word - word"), not inside hyphenated words like "on-call".
+    function isClauseDelimiter(text, pos) {
+        if (CLAUSE_DELIMITERS.test(text[pos])) return true;
+        if (text[pos] === '-') {
+            const before = pos > 0 ? /\s/.test(text[pos - 1]) : true;
+            const after = pos < text.length - 1 ? /\s/.test(text[pos + 1]) : true;
+            return before || after;
+        }
+        return false;
+    }
 
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', initSelection);
@@ -108,7 +120,7 @@
         // Scan left for clause delimiter or sentence boundary
         let left = cursorPos;
         while (left > 0) {
-            if (CLAUSE_DELIMITERS.test(text[left - 1])) break;
+            if (isClauseDelimiter(text, left - 1)) break;
             if (isSentenceBoundary(text, left - 1)) break;
             left--;
         }
@@ -116,7 +128,7 @@
         // Scan right for clause delimiter or sentence boundary
         let right = cursorPos;
         while (right < text.length) {
-            if (CLAUSE_DELIMITERS.test(text[right])) break;
+            if (isClauseDelimiter(text, right)) break;
             if (isSentenceBoundary(text, right)) {
                 right++; // Include the punctuation
                 break;
