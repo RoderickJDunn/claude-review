@@ -922,10 +922,8 @@ ul.contains-task-list li {
 
 #markdown-content[contenteditable="true"] {
     outline: none;
-    border: 2px solid #0366d6;
     border-radius: 6px;
-    padding: 16px;
-    box-shadow: 0 0 0 3px rgba(3, 102, 214, 0.1);
+    box-shadow: 0 0 0 2px #0366d6, 0 0 0 5px rgba(3, 102, 214, 0.1);
     cursor: text;
 }
 

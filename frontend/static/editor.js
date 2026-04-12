@@ -184,9 +184,18 @@
         isDirty = false;
         nav.editMode = true;
 
-        // Deactivate keyboard nav and show toolbar as loading indicator
+        // Deactivate keyboard nav
         if (window.crNavUtils) window.crNavUtils.deactivate();
+
+        // Show toolbar and compensate scroll synchronously (before browser
+        // paints) to prevent scroll anchoring from double-adjusting.
+        const scrollY = window.scrollY;
+        const contentTopBefore = content.getBoundingClientRect().top;
         toolbar.style.display = 'flex';
+        const shift = content.getBoundingClientRect().top - contentTopBefore;
+        if (shift !== 0) {
+            window.scrollTo(0, scrollY + shift);
+        }
 
         // Fetch raw markdown
         try {
@@ -202,13 +211,14 @@
             mode = 'off';
             nav.editMode = false;
             toolbar.style.display = 'none';
+            window.scrollTo(0, scrollY);
             return;
         }
 
         // Insert invisible anchors around comment highlights
         insertCommentAnchors();
 
-        // Enable contenteditable
+        // Enable contenteditable (box-shadow only, no layout shift)
         content.setAttribute('contenteditable', 'true');
 
         // Place caret at the nav cursor position (or start of content)
@@ -220,7 +230,7 @@
 
     function placeCaret(content, savedCursor) {
         const sel = window.getSelection();
-        if (!sel) { content.focus(); return; }
+        if (!sel) { content.focus({ preventScroll: true }); return; }
 
         if (savedCursor && savedCursor.textNode && content.contains(savedCursor.textNode)) {
             try {
@@ -229,15 +239,13 @@
                 range.collapse(true);
                 sel.removeAllRanges();
                 sel.addRange(range);
-                // Scroll the cursor into view
-                savedCursor.textNode.parentElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
                 return;
             } catch (e) {
                 // Fall through to default
             }
         }
 
-        content.focus();
+        content.focus({ preventScroll: true });
     }
 
     function onContentInput() {

@@ -182,16 +182,27 @@
 
             const nav = window.crNav;
 
-            // Find the block closest to the click Y position
-            let bestBlockIdx = 0;
-            let bestBlockDist = Infinity;
+            // Find the block containing the click (containment first,
+            // then nearest-center as fallback for clicks in margins)
+            let bestBlockIdx = -1;
             for (let i = 0; i < nav.blocks.length; i++) {
                 const rect = nav.blocks[i].element.getBoundingClientRect();
-                const blockCenterY = rect.top + rect.height / 2;
-                const dist = Math.abs(blockCenterY - clickY);
-                if (dist < bestBlockDist) {
-                    bestBlockDist = dist;
+                if (clickY >= rect.top && clickY <= rect.bottom) {
                     bestBlockIdx = i;
+                    break;
+                }
+            }
+            if (bestBlockIdx === -1) {
+                bestBlockIdx = 0;
+                let bestBlockDist = Infinity;
+                for (let i = 0; i < nav.blocks.length; i++) {
+                    const rect = nav.blocks[i].element.getBoundingClientRect();
+                    const blockCenterY = rect.top + rect.height / 2;
+                    const dist = Math.abs(blockCenterY - clickY);
+                    if (dist < bestBlockDist) {
+                        bestBlockDist = dist;
+                        bestBlockIdx = i;
+                    }
                 }
             }
 
@@ -201,20 +212,41 @@
 
             if (words.length === 0) return;
 
-            // Find the word closest to the click position
-            let bestWord = words[0];
-            let bestDist = Infinity;
-            for (const word of words) {
+            // Find the word closest to the click position.
+            // Two-pass: find the visual line closest to clickY, then
+            // pick the closest word on that line by X distance only.
+            // This prevents words on adjacent lines from stealing clicks.
+            const wordRects = words.map(word => {
                 const range = document.createRange();
                 range.setStart(word.textNode, word.wordStart);
                 range.setEnd(word.textNode, word.wordEnd);
-                const rect = range.getBoundingClientRect();
-                const dx = (rect.left + rect.width / 2) - clickX;
-                const dy = (rect.top + rect.height / 2) - clickY;
-                const dist = dx * dx + dy * dy;
-                if (dist < bestDist) {
-                    bestDist = dist;
-                    bestWord = word;
+                return range.getBoundingClientRect();
+            });
+
+            // Pass 1: find the line Y closest to click
+            let closestLineY = 0;
+            let closestLineDist = Infinity;
+            for (let i = 0; i < words.length; i++) {
+                const centerY = wordRects[i].top + wordRects[i].height / 2;
+                const dist = Math.abs(centerY - clickY);
+                if (dist < closestLineDist) {
+                    closestLineDist = dist;
+                    closestLineY = centerY;
+                }
+            }
+
+            // Pass 2: among words on that line, find closest by X
+            const LINE_TOLERANCE = 4;
+            let bestWord = words[0];
+            let bestXDist = Infinity;
+            for (let i = 0; i < words.length; i++) {
+                const centerY = wordRects[i].top + wordRects[i].height / 2;
+                if (Math.abs(centerY - closestLineY) <= LINE_TOLERANCE) {
+                    const xDist = Math.abs((wordRects[i].left + wordRects[i].width / 2) - clickX);
+                    if (xDist < bestXDist) {
+                        bestXDist = xDist;
+                        bestWord = words[i];
+                    }
                 }
             }
 
