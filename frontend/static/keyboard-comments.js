@@ -22,6 +22,20 @@
             panel.addEventListener('click', (e) => {
                 // Don't enter pane mode if clicking buttons
                 if (e.target.closest('.comment-badge-btn')) return;
+
+                // If a specific thread was clicked, update pane index to match
+                const threadContainer = e.target.closest('.thread-container');
+                if (threadContainer) {
+                    const viewer = window.crViewer;
+                    if (viewer) {
+                        const threads = viewer.getRootThreadContainers();
+                        const idx = Array.prototype.indexOf.call(threads, threadContainer);
+                        if (idx !== -1) {
+                            window.crNav.paneCommentIndex = idx;
+                        }
+                    }
+                }
+
                 enterPaneMode();
             });
         }

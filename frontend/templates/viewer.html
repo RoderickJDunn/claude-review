@@ -8,6 +8,7 @@
     </head>
     <body>
         <div class="breadcrumb">
+            <span class="version-indicator" title="{{.Version}} ({{.CommitHash}})">{{.CommitHash}}</span>
             <a href="/">Home</a>
             <span class="breadcrumb-separator">›</span>
             <a href="/projects{{.ProjectDir | pathescape}}">{{.ProjectDir | base}}</a>

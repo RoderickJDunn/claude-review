@@ -188,6 +188,17 @@ ul.contains-task-list li {
     margin: 0 5px;
 }
 
+.version-indicator {
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    font-size: 11px;
+    color: #959da5;
+    background: #f1f3f5;
+    padding: 1px 5px;
+    border-radius: 3px;
+    margin-right: 8px;
+    cursor: default;
+}
+
 /* Project list (index page) */
 .project-list {
     list-style: none;
@@ -938,4 +949,16 @@ ul.contains-task-list li {
     outline: none;
     border-color: #0366d6;
     box-shadow: 0 0 0 3px rgba(3, 102, 214, 0.15);
+}
+
+/* Invisible comment anchors (used during edit mode) */
+.cr-anchor {
+    display: inline;
+    width: 0;
+    height: 0;
+    font-size: 0;
+    line-height: 0;
+    overflow: hidden;
+    user-select: none;
+    pointer-events: none;
 }

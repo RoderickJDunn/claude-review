@@ -134,6 +134,9 @@
     }
 
     function handleTextSelection(event) {
+        // Don't interfere during edit mode
+        if (window.crNav.editMode) return;
+
         const selection = window.getSelection();
         const selectedText = selection.toString().trim();
 
@@ -1006,9 +1009,12 @@
             return;
         }
 
-        // Highlight each comment by finding its text in the document
+        // Highlight root comments by finding their text in the document
+        // (replies have no selected_text and don't get their own highlight)
         comments.forEach((comment) => {
-            highlightExistingComment(comment);
+            if (!comment.root_id && comment.selected_text) {
+                highlightExistingComment(comment);
+            }
         });
 
         // Update comment panel after loading all comments
@@ -1066,10 +1072,27 @@
             }
         }
 
-        // Try to find the text using window.find() which handles fragmented text nodes
-        for (const block of relevantBlocks) {
-            // First, try simple text node search for performance
-            const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT, null, false);
+        // Search in line-matched blocks first, then fall back to all blocks
+        if (relevantBlocks.length > 0 && searchBlocksForText(relevantBlocks, text, comment)) return;
+
+        // Fallback: line numbers may be stale — search the entire document
+        if (searchBlocksForText(Array.from(blockElements), text, comment)) return;
+
+        console.warn('Could not find text to highlight:', text);
+    }
+
+    function searchBlocksForText(blocks, text, comment) {
+        for (const block of blocks) {
+            // First try: find text in a single text node (not inside existing highlights)
+            const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT, {
+                acceptNode: function (node) {
+                    // Skip text nodes inside existing comment highlights
+                    if (node.parentElement && node.parentElement.closest('.comment-highlight')) {
+                        return NodeFilter.FILTER_REJECT;
+                    }
+                    return NodeFilter.FILTER_ACCEPT;
+                }
+            }, false);
             let node;
             while ((node = walker.nextNode())) {
                 const index = node.textContent.indexOf(text);
@@ -1078,68 +1101,78 @@
                     range.setStart(node, index);
                     range.setEnd(node, index + text.length);
                     highlightComment(range, comment);
-                    return;
+                    return true;
                 }
             }
 
-            // If simple search failed, use a more robust approach that handles inline elements
-            // Get all text content from the block, then search for our text
-            const blockText = block.textContent;
-            const textIndex = blockText.indexOf(text);
+            // Second try: text may span multiple nodes (e.g., across inline code)
+            // Build a text-content string that excludes already-highlighted regions
+            const blockText = getUnhighlightedText(block);
+            const textIndex = blockText.text.indexOf(text);
             if (textIndex !== -1) {
-                // Found the text in this block, now find the exact range
-                const range = findTextRange(block, text, textIndex);
+                const range = findTextRangeInMappedNodes(blockText.nodes, text, textIndex);
                 if (range) {
                     highlightComment(range, comment);
-                    return;
+                    return true;
                 }
             }
         }
-
-        console.warn('Could not find text to highlight:', text);
+        return false;
     }
 
     /**
-     * Find a range for the given text within a container element,
-     * handling cases where text spans multiple nodes (e.g., across inline code elements)
+     * Build a concatenated text string from a block's text nodes, skipping
+     * nodes inside existing .comment-highlight spans. Returns the text and
+     * a mapping of character positions to {node, offset} for range creation.
      */
-    function findTextRange(container, searchText, textIndex) {
-        const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null, false);
+    function getUnhighlightedText(block) {
+        const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT, {
+            acceptNode: function (node) {
+                if (node.parentElement && node.parentElement.closest('.comment-highlight')) {
+                    return NodeFilter.FILTER_REJECT;
+                }
+                return NodeFilter.FILTER_ACCEPT;
+            }
+        }, false);
 
-        let currentPos = 0;
-        let startNode = null;
-        let startOffset = 0;
-        let endNode = null;
-        let endOffset = 0;
-
+        let text = '';
+        const nodes = []; // [{node, startPos, endPos}]
         let node;
         while ((node = walker.nextNode())) {
-            const nodeLength = node.textContent.length;
+            const startPos = text.length;
+            text += node.textContent;
+            nodes.push({ node, startPos, endPos: text.length });
+        }
 
-            // Check if this node contains the start of our search text
-            if (startNode === null && currentPos + nodeLength > textIndex) {
-                startNode = node;
-                startOffset = textIndex - currentPos;
+        return { text, nodes };
+    }
+
+    /**
+     * Find a range for text at a given offset in a mapped node list.
+     */
+    function findTextRangeInMappedNodes(nodes, searchText, textIndex) {
+        const searchEnd = textIndex + searchText.length;
+        let startNode = null, startOffset = 0;
+        let endNode = null, endOffset = 0;
+
+        for (const entry of nodes) {
+            if (!startNode && entry.endPos > textIndex) {
+                startNode = entry.node;
+                startOffset = textIndex - entry.startPos;
             }
-
-            // Check if this node contains the end of our search text
-            if (startNode !== null && currentPos + nodeLength >= textIndex + searchText.length) {
-                endNode = node;
-                endOffset = textIndex + searchText.length - currentPos;
+            if (entry.endPos >= searchEnd) {
+                endNode = entry.node;
+                endOffset = searchEnd - entry.startPos;
                 break;
             }
-
-            currentPos += nodeLength;
         }
 
-        if (startNode && endNode) {
-            const range = document.createRange();
-            range.setStart(startNode, startOffset);
-            range.setEnd(endNode, endOffset);
-            return range;
-        }
+        if (!startNode || !endNode) return null;
 
-        return null;
+        const range = document.createRange();
+        range.setStart(startNode, startOffset);
+        range.setEnd(endNode, endOffset);
+        return range;
     }
 
     /**

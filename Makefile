@@ -40,7 +40,7 @@ test-ci:
 	grep -h -v "^mode:" coverage-unit.txt coverage-e2e.txt >> coverage.txt
 
 build:
-	go build -trimpath -ldflags="-s -w -X main.Version=${CR_VERSION}" -o ./${CR_BUILD_ARTIFACTS_DIR}/${CR_EXECUTABLE_FILENAME} .
+	go build -trimpath -ldflags="-s -w -X main.Version=${CR_VERSION} -X main.CommitHash=$$(git rev-parse --short HEAD)" -o ./${CR_BUILD_ARTIFACTS_DIR}/${CR_EXECUTABLE_FILENAME} .
 
 build-release: build
 

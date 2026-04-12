@@ -27,6 +27,7 @@ func main() {
 		fmt.Println("  address                  Show unresolved comments for a file")
 		fmt.Println("  reply                    Reply to a comment thread")
 		fmt.Println("  resolve                  Mark comments as resolved")
+		fmt.Println("  clear                    Delete all comments for a file")
 		fmt.Println("  install                  Install slash commands")
 		fmt.Println("  uninstall                Uninstall slash commands")
 		fmt.Println("  version                  Show version information")
@@ -48,6 +49,8 @@ func main() {
 		runReply()
 	case "resolve":
 		runResolve()
+	case "clear":
+		runClear()
 	case "install":
 		runInstall()
 	case "uninstall":
@@ -544,6 +547,50 @@ func runResolve() {
 		fmt.Printf("Resolved %d comment(s) for %s\n", count, *filePath)
 
 		// Notify server about resolved comments (if server is running)
+		notifyServerCommentsChanged(*projectDir, *filePath)
+	}
+}
+
+func runClear() {
+	clearCmd := flag.NewFlagSet("clear", flag.ExitOnError)
+	projectDir := clearCmd.String("project", "", "Project directory (defaults to current directory)")
+	filePath := clearCmd.String("file", "", "File path relative to project directory")
+
+	if err := clearCmd.Parse(os.Args[2:]); err != nil {
+		log.Fatalf("Failed to parse flags: %v", err)
+	}
+
+	if *projectDir == "" || *projectDir == "." {
+		cwd, err := os.Getwd()
+		if err != nil {
+			log.Fatalf("Failed to get current directory: %v", err)
+		}
+		*projectDir = cwd
+	}
+	if *filePath == "" {
+		fmt.Println("Error: --file flag is required")
+		os.Exit(1)
+	}
+
+	*filePath = strings.TrimPrefix(*filePath, "@")
+
+	if err := initDB(); err != nil {
+		log.Fatalf("Failed to initialize database: %v", err)
+	}
+
+	if filepath.IsAbs(*filePath) {
+		*projectDir, *filePath = resolveFileToProject(*filePath, *projectDir)
+	}
+
+	count, err := deleteAllComments(*projectDir, *filePath)
+	if err != nil {
+		log.Fatalf("Failed to clear comments: %v", err)
+	}
+
+	if count == 0 {
+		fmt.Printf("No comments found for %s\n", *filePath)
+	} else {
+		fmt.Printf("Deleted %d comment(s) for %s\n", count, *filePath)
 		notifyServerCommentsChanged(*projectDir, *filePath)
 	}
 }

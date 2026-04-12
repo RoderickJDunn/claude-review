@@ -176,6 +176,8 @@ func renderViewer(w http.ResponseWriter, r *http.Request, projectDir, filePath s
 		"FilePath":    filePath,
 		"HTMLContent": template.HTML(html),
 		"Comments":    comments,
+		"Version":     Version,
+		"CommitHash":  CommitHash,
 	}
 
 	if err := templates.ExecuteTemplate(w, "viewer.html", data); err != nil {
@@ -527,11 +529,20 @@ func handleGetContent(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(content)
 }
 
+// AnchorUpdate represents a comment position update from the frontend's
+// invisible anchor system. When the editor extracts anchor positions on save,
+// it sends these updates so we can precisely reposition comments.
+type AnchorUpdate struct {
+	CommentID    int    `json:"comment_id"`
+	SelectedText string `json:"selected_text"`
+}
+
 func handleSaveContent(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ProjectDirectory string `json:"project_directory"`
-		FilePath         string `json:"file_path"`
-		Content          string `json:"content"`
+		ProjectDirectory string         `json:"project_directory"`
+		FilePath         string         `json:"file_path"`
+		Content          string         `json:"content"`
+		AnchorUpdates    []AnchorUpdate `json:"anchor_updates"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -550,14 +561,28 @@ func handleSaveContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Suppress the file watcher reload for our own save
+	// Read old content before overwriting (for comment re-anchoring)
+	oldContent, _ := os.ReadFile(absPath)
+
+	// Suppress the file watcher reload for our own save, and update the
+	// content snapshot so future external-change diffs have the right baseline.
 	if fileWatcher != nil {
 		fileWatcher.SuppressNext(absPath)
+		fileWatcher.UpdateContentSnapshot(absPath, req.Content)
 	}
 
 	if err := os.WriteFile(absPath, []byte(req.Content), 0644); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+
+	// Re-anchor comments: use anchor-based updates from the rich editor when
+	// available (precise), fall back to diff-based reanchoring (for raw mode
+	// or when no anchors were sent).
+	if len(req.AnchorUpdates) > 0 {
+		applyAnchorUpdates(req.ProjectDirectory, req.FilePath, req.Content, req.AnchorUpdates)
+	} else if len(oldContent) > 0 {
+		reanchorComments(req.ProjectDirectory, req.FilePath, string(oldContent), req.Content)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

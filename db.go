@@ -254,6 +254,24 @@ func deleteComment(commentID string) error {
 	return err
 }
 
+func deleteAllComments(projectDir, filePath string) (int, error) {
+	query := `
+		DELETE FROM comments
+		WHERE project_directory = ? AND file_path = ?`
+	logQuery(query, projectDir, filePath)
+	result, err := db.Exec(query, projectDir, filePath)
+	if err != nil {
+		return 0, err
+	}
+
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+
+	return int(count), nil
+}
+
 func resolveComments(projectDir, filePath string) (int, error) {
 	query := `
 		UPDATE comments

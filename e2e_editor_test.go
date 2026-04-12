@@ -480,3 +480,323 @@ func TestE2E_ViewerHTML_IncludesEditorElements(t *testing.T) {
 	// Editor toolbar should be hidden by default
 	assert.Contains(t, bodyStr, `id="editor-toolbar" style="display: none;"`)
 }
+
+// Re-anchoring tests
+
+func TestE2E_SaveContent_ReanchorsComments_LineShift(t *testing.T) {
+	env := setupE2E(t)
+	_, err := env.runCLI(t, "register", "--project", env.ProjectDir)
+	require.NoError(t, err)
+
+	// test.md line 3: "This is a test paragraph with some content."
+	comment := map[string]interface{}{
+		"project_directory": env.ProjectDir,
+		"file_path":         "test.md",
+		"line_start":        3,
+		"line_end":          3,
+		"selected_text":     "test paragraph",
+		"comment_text":      "Needs more detail",
+	}
+	resp := env.postJSON(t, "/api/comments", comment)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var created map[string]interface{}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&created))
+	commentID := int(created["id"].(float64))
+
+	// Insert 4 new lines before the paragraph (2 content + 2 blank)
+	origContent, err := os.ReadFile(filepath.Join(env.ProjectDir, "test.md"))
+	require.NoError(t, err)
+	newContent := "# Test Document\n\nNew paragraph one.\n\nNew paragraph two.\n\n" +
+		"This is a test paragraph with some content.\n\n## Section 2\n\n" +
+		"Another paragraph with more content for testing.\n\n### Code Example\n\n" +
+		"```go\nfunc main() {\n\tfmt.Println(\"hello\")\n}\n```\n\n## Conclusion\n\nFinal paragraph.\n"
+	_ = origContent
+
+	saveResp := env.putJSON(t, "/api/content", map[string]string{
+		"project_directory": env.ProjectDir,
+		"file_path":         "test.md",
+		"content":           newContent,
+	})
+	defer func() { _ = saveResp.Body.Close() }()
+	require.Equal(t, http.StatusOK, saveResp.StatusCode)
+
+	// Verify the comment was re-anchored
+	output, err := env.runCLI(t, "address", "--file", "test.md", "--project", env.ProjectDir)
+	require.NoError(t, err)
+	assert.Contains(t, output, "Needs more detail")
+	// Comment should have moved from line 3 to line 7
+	assert.Contains(t, output, fmt.Sprintf("Comment #%d (lines 7-7)", commentID))
+}
+
+func TestE2E_SaveContent_ReanchorsComments_FuzzyText(t *testing.T) {
+	env := setupE2E(t)
+	_, err := env.runCLI(t, "register", "--project", env.ProjectDir)
+	require.NoError(t, err)
+
+	// Comment on "test paragraph with some content" at line 3
+	comment := map[string]interface{}{
+		"project_directory": env.ProjectDir,
+		"file_path":         "test.md",
+		"line_start":        3,
+		"line_end":          3,
+		"selected_text":     "test paragraph with some content",
+		"comment_text":      "Fix this wording",
+	}
+	resp := env.postJSON(t, "/api/comments", comment)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Slightly modify the commented text
+	newContent := "# Test Document\n\nThis is a test paragraph with improved content.\n\n## Section 2\n\n" +
+		"Another paragraph with more content for testing.\n"
+	saveResp := env.putJSON(t, "/api/content", map[string]string{
+		"project_directory": env.ProjectDir,
+		"file_path":         "test.md",
+		"content":           newContent,
+	})
+	defer func() { _ = saveResp.Body.Close() }()
+	require.Equal(t, http.StatusOK, saveResp.StatusCode)
+
+	// The comment should still be found via fuzzy match
+	output, err := env.runCLI(t, "address", "--file", "test.md", "--project", env.ProjectDir)
+	require.NoError(t, err)
+	assert.Contains(t, output, "Fix this wording")
+	// The selected_text should have been updated
+	assert.NotContains(t, output, "> test paragraph with some content\n")
+}
+
+func TestE2E_SaveContent_ReanchorsComments_NoChangeNoOp(t *testing.T) {
+	env := setupE2E(t)
+	_, err := env.runCLI(t, "register", "--project", env.ProjectDir)
+	require.NoError(t, err)
+
+	comment := map[string]interface{}{
+		"project_directory": env.ProjectDir,
+		"file_path":         "test.md",
+		"line_start":        3,
+		"line_end":          3,
+		"selected_text":     "test paragraph",
+		"comment_text":      "This is fine",
+	}
+	resp := env.postJSON(t, "/api/comments", comment)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var created map[string]interface{}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&created))
+	commentID := int(created["id"].(float64))
+
+	// Save identical content
+	origContent, err := os.ReadFile(filepath.Join(env.ProjectDir, "test.md"))
+	require.NoError(t, err)
+
+	saveResp := env.putJSON(t, "/api/content", map[string]string{
+		"project_directory": env.ProjectDir,
+		"file_path":         "test.md",
+		"content":           string(origContent),
+	})
+	defer func() { _ = saveResp.Body.Close() }()
+	require.Equal(t, http.StatusOK, saveResp.StatusCode)
+
+	// Lines should be unchanged
+	output, err := env.runCLI(t, "address", "--file", "test.md", "--project", env.ProjectDir)
+	require.NoError(t, err)
+	assert.Contains(t, output, fmt.Sprintf("Comment #%d (lines 3-3)", commentID))
+	assert.Contains(t, output, "test paragraph")
+}
+
+// --- Anchor-based save tests ---
+
+func TestE2E_SaveContent_AnchorUpdates_Basic(t *testing.T) {
+	env := setupE2E(t)
+	_, err := env.runCLI(t, "register", "--project", env.ProjectDir)
+	require.NoError(t, err)
+
+	// Create a comment at line 3
+	comment := map[string]interface{}{
+		"project_directory": env.ProjectDir,
+		"file_path":         "test.md",
+		"line_start":        3,
+		"line_end":          3,
+		"selected_text":     "test paragraph",
+		"comment_text":      "Anchor test",
+	}
+	resp := env.postJSON(t, "/api/comments", comment)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var created map[string]interface{}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&created))
+	commentID := int(created["id"].(float64))
+
+	// Save new content with anchor_updates (simulating rich editor save).
+	// The text moved to line 5 due to inserted lines.
+	newContent := "# Test Document\n\nNew intro.\n\nThis is a test paragraph with some content.\n\n## Section 2\n"
+	anchorUpdates := []map[string]interface{}{
+		{
+			"comment_id":    commentID,
+			"selected_text": "test paragraph",
+		},
+	}
+
+	saveResp := env.putJSON(t, "/api/content", map[string]interface{}{
+		"project_directory": env.ProjectDir,
+		"file_path":         "test.md",
+		"content":           newContent,
+		"anchor_updates":    anchorUpdates,
+	})
+	defer func() { _ = saveResp.Body.Close() }()
+	require.Equal(t, http.StatusOK, saveResp.StatusCode)
+
+	// Verify the comment was updated via anchor (not diff)
+	output, err := env.runCLI(t, "address", "--file", "test.md", "--project", env.ProjectDir)
+	require.NoError(t, err)
+	assert.Contains(t, output, "Anchor test")
+	assert.Contains(t, output, fmt.Sprintf("Comment #%d (lines 5-5)", commentID))
+}
+
+func TestE2E_SaveContent_AnchorUpdates_TextChanged(t *testing.T) {
+	env := setupE2E(t)
+	_, err := env.runCLI(t, "register", "--project", env.ProjectDir)
+	require.NoError(t, err)
+
+	comment := map[string]interface{}{
+		"project_directory": env.ProjectDir,
+		"file_path":         "test.md",
+		"line_start":        3,
+		"line_end":          3,
+		"selected_text":     "test paragraph",
+		"comment_text":      "Edited text test",
+	}
+	resp := env.postJSON(t, "/api/comments", comment)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var created map[string]interface{}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&created))
+	commentID := int(created["id"].(float64))
+
+	// User edited the commented text in rich editor; anchor captured new text
+	newContent := "# Test Document\n\nThis is a improved paragraph with some content.\n\n## Section 2\n"
+	anchorUpdates := []map[string]interface{}{
+		{
+			"comment_id":    commentID,
+			"selected_text": "improved paragraph",
+		},
+	}
+
+	saveResp := env.putJSON(t, "/api/content", map[string]interface{}{
+		"project_directory": env.ProjectDir,
+		"file_path":         "test.md",
+		"content":           newContent,
+		"anchor_updates":    anchorUpdates,
+	})
+	defer func() { _ = saveResp.Body.Close() }()
+	require.Equal(t, http.StatusOK, saveResp.StatusCode)
+
+	output, err := env.runCLI(t, "address", "--file", "test.md", "--project", env.ProjectDir)
+	require.NoError(t, err)
+	assert.Contains(t, output, "Edited text test")
+	// selected_text should be updated to the new text
+	assert.Contains(t, output, "> improved paragraph\n")
+}
+
+func TestE2E_SaveContent_NoAnchors_FallsBackToDiff(t *testing.T) {
+	env := setupE2E(t)
+	_, err := env.runCLI(t, "register", "--project", env.ProjectDir)
+	require.NoError(t, err)
+
+	comment := map[string]interface{}{
+		"project_directory": env.ProjectDir,
+		"file_path":         "test.md",
+		"line_start":        3,
+		"line_end":          3,
+		"selected_text":     "test paragraph",
+		"comment_text":      "Diff fallback test",
+	}
+	resp := env.postJSON(t, "/api/comments", comment)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var created map[string]interface{}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&created))
+	commentID := int(created["id"].(float64))
+
+	// Save without anchor_updates (raw mode) — should use diff-based reanchoring
+	newContent := "# Test Document\n\nInserted line.\n\nThis is a test paragraph with some content.\n\n## Section 2\n"
+	saveResp := env.putJSON(t, "/api/content", map[string]string{
+		"project_directory": env.ProjectDir,
+		"file_path":         "test.md",
+		"content":           newContent,
+	})
+	defer func() { _ = saveResp.Body.Close() }()
+	require.Equal(t, http.StatusOK, saveResp.StatusCode)
+
+	output, err := env.runCLI(t, "address", "--file", "test.md", "--project", env.ProjectDir)
+	require.NoError(t, err)
+	assert.Contains(t, output, "Diff fallback test")
+	// Diff should move the comment from line 3 to line 5
+	assert.Contains(t, output, fmt.Sprintf("Comment #%d (lines 5-5)", commentID))
+}
+
+func TestE2E_ExternalChange_ReanchorsComments(t *testing.T) {
+	env := setupE2E(t)
+	_, err := env.runCLI(t, "register", "--project", env.ProjectDir)
+	require.NoError(t, err)
+
+	// Create a comment
+	comment := map[string]interface{}{
+		"project_directory": env.ProjectDir,
+		"file_path":         "test.md",
+		"line_start":        3,
+		"line_end":          3,
+		"selected_text":     "test paragraph",
+		"comment_text":      "External change test",
+	}
+	resp := env.postJSON(t, "/api/comments", comment)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var created map[string]interface{}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&created))
+	commentID := int(created["id"].(float64))
+
+	// Connect SSE to start the file watcher (which snapshots current content)
+	sseURL := fmt.Sprintf("%s/api/events?project_directory=%s&file_path=test.md",
+		env.BaseURL, url.QueryEscape(env.ProjectDir))
+	client := &http.Client{Timeout: 5 * time.Second}
+	sseResp, err := client.Get(sseURL)
+	require.NoError(t, err)
+	defer func() { _ = sseResp.Body.Close() }()
+	require.NoError(t, waitForSSEConnected(sseResp, 3*time.Second))
+
+	// Simulate external edit (e.g., from Obsidian) - insert lines before the comment
+	newContent := "# Test Document\n\nExternal addition.\n\nThis is a test paragraph with some content.\n\n## Section 2\n\nAnother paragraph.\n"
+	err = os.WriteFile(filepath.Join(env.ProjectDir, "test.md"), []byte(newContent), 0644)
+	require.NoError(t, err)
+
+	// Wait for file_updated event (watcher triggers reanchoring then broadcasts)
+	scanner := bufio.NewScanner(sseResp.Body)
+	eventReceived := false
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && scanner.Scan() {
+		line := scanner.Text()
+		if strings.Contains(line, "event: file_updated") {
+			eventReceived = true
+			break
+		}
+	}
+	assert.True(t, eventReceived, "Should receive file_updated event for external change")
+
+	// Give a moment for the reanchor to complete
+	time.Sleep(200 * time.Millisecond)
+
+	// Verify comment was reanchored
+	output, err := env.runCLI(t, "address", "--file", "test.md", "--project", env.ProjectDir)
+	require.NoError(t, err)
+	assert.Contains(t, output, "External change test")
+	// Comment should have moved from line 3 to line 5
+	assert.Contains(t, output, fmt.Sprintf("Comment #%d (lines 5-5)", commentID))
+}
