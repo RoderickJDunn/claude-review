@@ -105,15 +105,22 @@
         const cursorPos = getCursorPositionInBlock();
         if (cursorPos === -1) return getParagraphRange();
 
-        // Scan left for clause delimiter
+        // Scan left for clause delimiter or sentence boundary
         let left = cursorPos;
-        while (left > 0 && !CLAUSE_DELIMITERS.test(text[left - 1])) {
+        while (left > 0) {
+            if (CLAUSE_DELIMITERS.test(text[left - 1])) break;
+            if (isSentenceBoundary(text, left - 1)) break;
             left--;
         }
 
-        // Scan right for clause delimiter
+        // Scan right for clause delimiter or sentence boundary
         let right = cursorPos;
-        while (right < text.length && !CLAUSE_DELIMITERS.test(text[right])) {
+        while (right < text.length) {
+            if (CLAUSE_DELIMITERS.test(text[right])) break;
+            if (isSentenceBoundary(text, right)) {
+                right++; // Include the punctuation
+                break;
+            }
             right++;
         }
 

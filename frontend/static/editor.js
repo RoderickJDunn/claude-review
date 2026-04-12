@@ -168,6 +168,34 @@
         anchors.forEach(anchor => anchor.remove());
     }
 
+    /**
+     * Strip viewer.js-added elements from the DOM before Turndown conversion.
+     * Margin indicator <div>s inside <p> tags cause the HTML parser to split
+     * the paragraph, producing unwanted newlines in the saved markdown.
+     */
+    function cleanDomForConversion(content) {
+        // Remove margin indicator divs (appended inside block elements)
+        content.querySelectorAll('.comment-margin-indicator').forEach(el => el.remove());
+
+        // Unwrap any lingering .comment-highlight spans (safety net — they
+        // should already have been replaced by anchors on edit-mode entry)
+        content.querySelectorAll('.comment-highlight').forEach(span => {
+            const parent = span.parentNode;
+            while (span.firstChild) {
+                parent.insertBefore(span.firstChild, span);
+            }
+            parent.removeChild(span);
+        });
+
+        // Remove inline styles added by addCommentMarginIndicators()
+        content.querySelectorAll('[style]').forEach(el => {
+            el.removeAttribute('style');
+        });
+
+        // Merge adjacent text nodes left behind by element removal
+        content.normalize();
+    }
+
     // --- Edit Mode Lifecycle ---
 
     async function enterEditMode() {
@@ -269,8 +297,9 @@
         // Convert current HTML to markdown if dirty, otherwise use original
         let md;
         if (isDirty) {
-            // Remove anchors before conversion (they'll be re-inserted if user switches back)
+            // Remove anchors and viewer.js artifacts before conversion
             removeAnchors();
+            cleanDomForConversion(content);
             md = turndownService.turndown(content.innerHTML);
         } else {
             md = originalMarkdown;
@@ -320,6 +349,12 @@
 
             const content = document.getElementById('markdown-content');
             if (!content) return;
+
+            // Clean up DOM elements added by viewer.js that would
+            // corrupt the Turndown conversion (e.g. <div> inside <p>
+            // causes the HTML parser to split the paragraph).
+            cleanDomForConversion(content);
+
             markdown = turndownService.turndown(content.innerHTML);
         } else if (mode === 'raw') {
             // In raw mode, no anchors — diff-based reanchoring handles this
