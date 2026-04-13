@@ -281,6 +281,17 @@
             el.removeAttribute('style');
         });
 
+        // Replace non-breaking spaces (\u00a0 / &nbsp;) with regular spaces.
+        // contenteditable inserts these during editing; Turndown preserves
+        // them verbatim, corrupting the saved markdown.
+        const tw = document.createTreeWalker(content, NodeFilter.SHOW_TEXT);
+        let tn;
+        while ((tn = tw.nextNode())) {
+            if (tn.nodeValue.includes('\u00a0')) {
+                tn.nodeValue = tn.nodeValue.replace(/\u00a0/g, ' ');
+            }
+        }
+
         // Merge adjacent text nodes left behind by element removal
         content.normalize();
     }
