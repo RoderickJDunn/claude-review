@@ -146,6 +146,16 @@
         });
     }
 
+    /** Find the first block child of `container` whose top edge is in or below the viewport. */
+    function findVisualAnchor(container) {
+        const blocks = container.querySelectorAll(':scope > *');
+        for (const el of blocks) {
+            if (el.getBoundingClientRect().top >= 0) return el;
+        }
+        // Fallback: last block (user scrolled past everything)
+        return blocks.length ? blocks[blocks.length - 1] : null;
+    }
+
     // --- Anchor Management ---
 
     /**
@@ -294,15 +304,16 @@
         // Deactivate keyboard nav
         if (window.crNavUtils) window.crNavUtils.deactivate();
 
-        // Show toolbar and compensate scroll synchronously (before browser
-        // paints) to prevent scroll anchoring from double-adjusting.
+        // Find a visual anchor: the first block element whose top is in or
+        // below the viewport.  We record its viewport-relative position now
+        // and restore it after all DOM changes (toolbar, anchors, contenteditable)
+        // to prevent any perceived scroll jump.
+        const anchorEl = findVisualAnchor(content);
+        const anchorTop = anchorEl ? anchorEl.getBoundingClientRect().top : null;
         const scrollY = window.scrollY;
-        const contentTopBefore = content.getBoundingClientRect().top;
+
+        // Show toolbar
         toolbar.style.display = 'flex';
-        const shift = content.getBoundingClientRect().top - contentTopBefore;
-        if (shift !== 0) {
-            window.scrollTo(0, scrollY + shift);
-        }
 
         // Fetch raw markdown
         try {
@@ -330,6 +341,16 @@
 
         // Place caret at the nav cursor position (or start of content)
         placeCaret(content, savedCursor);
+
+        // Restore scroll so the visual anchor element stays at the same
+        // viewport position it occupied before we showed the toolbar.
+        if (anchorEl && anchorTop !== null) {
+            const newTop = anchorEl.getBoundingClientRect().top;
+            const drift = newTop - anchorTop;
+            if (Math.abs(drift) > 1) {
+                window.scrollTo(0, window.scrollY + drift);
+            }
+        }
 
         // Track changes and format button state
         content.addEventListener('input', onContentInput);
