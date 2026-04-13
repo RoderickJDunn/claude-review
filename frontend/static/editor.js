@@ -40,6 +40,12 @@
         if (saveBtn) saveBtn.addEventListener('click', saveContent);
         if (cancelBtn) cancelBtn.addEventListener('click', () => exitEditMode(false));
         if (rawToggle) rawToggle.addEventListener('click', toggleRawRich);
+
+        document.querySelectorAll('.editor-format-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                formatBlock(btn.dataset.format);
+            });
+        });
     }
 
     function handleEditorKeys(e) {
@@ -57,6 +63,16 @@
             return;
         }
 
+        // Cmd+0..4 to format blocks in rich edit mode
+        if (mode === 'rich' && (e.metaKey || e.ctrlKey)) {
+            const formats = { '0': 'p', '1': 'h1', '2': 'h2', '3': 'h3', '4': 'h4' };
+            if (formats[e.key]) {
+                e.preventDefault();
+                formatBlock(formats[e.key]);
+                return;
+            }
+        }
+
         // 'e' to enter edit mode (when not in input and not already editing)
         if (mode === 'off' && e.key === 'e') {
             if (window.crNavUtils && window.crNavUtils.isInputFocused()) return;
@@ -65,6 +81,69 @@
             e.preventDefault();
             enterEditMode();
         }
+    }
+
+    function formatBlock(tag) {
+        const content = document.getElementById('markdown-content');
+        if (!content || mode !== 'rich') return;
+
+        const sel = window.getSelection();
+        if (!sel || sel.rangeCount === 0) return;
+
+        // Find the block element containing the selection
+        let node = sel.anchorNode;
+        if (node.nodeType === Node.TEXT_NODE) node = node.parentNode;
+
+        // Walk up to find the direct child of #markdown-content
+        while (node && node.parentNode !== content) {
+            node = node.parentNode;
+        }
+        if (!node || node.parentNode !== content) return;
+
+        // Create the new element and transfer content
+        const newEl = document.createElement(tag);
+        while (node.firstChild) {
+            newEl.appendChild(node.firstChild);
+        }
+
+        // Copy any data attributes (line tracking)
+        Array.from(node.attributes).forEach(attr => {
+            if (attr.name.startsWith('data-')) {
+                newEl.setAttribute(attr.name, attr.value);
+            }
+        });
+
+        content.replaceChild(newEl, node);
+
+        // Restore caret inside the new element
+        const range = document.createRange();
+        range.selectNodeContents(newEl);
+        range.collapse(false);
+        sel.removeAllRanges();
+        sel.addRange(range);
+
+        isDirty = true;
+        updateFormatButtonState();
+    }
+
+    function updateFormatButtonState() {
+        const content = document.getElementById('markdown-content');
+        const sel = window.getSelection();
+        if (!content || !sel || sel.rangeCount === 0) {
+            document.querySelectorAll('.editor-format-btn').forEach(b => b.classList.remove('active'));
+            return;
+        }
+
+        let node = sel.anchorNode;
+        if (node && node.nodeType === Node.TEXT_NODE) node = node.parentNode;
+        while (node && node.parentNode !== content) {
+            node = node.parentNode;
+        }
+
+        const currentTag = node ? node.tagName.toLowerCase() : '';
+        document.querySelectorAll('.editor-format-btn').forEach(btn => {
+            btn.classList.toggle('active', btn.dataset.format === currentTag);
+        });
     }
 
     // --- Anchor Management ---
@@ -252,8 +331,13 @@
         // Place caret at the nav cursor position (or start of content)
         placeCaret(content, savedCursor);
 
-        // Track changes
+        // Track changes and format button state
         content.addEventListener('input', onContentInput);
+        document.addEventListener('selectionchange', onSelectionChange);
+    }
+
+    function onSelectionChange() {
+        if (mode === 'rich') updateFormatButtonState();
     }
 
     function placeCaret(content, savedCursor) {
@@ -398,6 +482,7 @@
         mode = 'off';
         isDirty = false;
         window.crNav.editMode = false;
+        document.removeEventListener('selectionchange', onSelectionChange);
 
         // Always reload to restore clean DOM (contenteditable can damage
         // comment highlight spans and other DOM structures)

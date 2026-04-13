@@ -3,6 +3,9 @@
     <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <meta name="description" content="{{.FilePath}}" />
+        <meta property="og:title" content="{{.FilePath | base}}" />
+        <meta property="og:type" content="article" />
         <title>{{.FilePath}} - Claude Review</title>
         <link rel="stylesheet" href="/static/styles.css" />
     </head>
@@ -14,17 +17,32 @@
             <a href="/projects{{.ProjectDir | pathescape}}">{{.ProjectDir | base}}</a>
             <span class="breadcrumb-separator">›</span>
             <span>{{.FilePath}}</span>
+            <button id="copy-markdown-btn" class="copy-markdown-btn" title="Copy as markdown">
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>
+                </svg>
+                <span class="copy-label">Copy</span>
+            </button>
         </div>
 
         <div id="editor-toolbar" style="display: none;">
             <span class="editor-mode-label">Edit Mode</span>
+            <div class="editor-format-group">
+                <button class="editor-format-btn" data-format="p" title="Paragraph (Cmd+0)">P</button>
+                <button class="editor-format-btn" data-format="h1" title="Heading 1 (Cmd+1)">H1</button>
+                <button class="editor-format-btn" data-format="h2" title="Heading 2 (Cmd+2)">H2</button>
+                <button class="editor-format-btn" data-format="h3" title="Heading 3 (Cmd+3)">H3</button>
+                <button class="editor-format-btn" data-format="h4" title="Heading 4 (Cmd+4)">H4</button>
+            </div>
             <button id="editor-raw-toggle" class="comment-btn">Raw</button>
             <button id="editor-save-btn" class="comment-btn comment-btn-primary">Save</button>
             <button id="editor-cancel-btn" class="comment-btn">Cancel</button>
             <span class="editor-hint">Cmd+S to save · Escape to cancel</span>
         </div>
 
-        <div id="markdown-content">{{.HTMLContent}}</div>
+        <article>
+            <div id="markdown-content">{{.HTMLContent}}</div>
+        </article>
         <textarea id="editor-raw-textarea" style="display: none;" spellcheck="false"></textarea>
 
         <!-- Comment panel (created in HTML to avoid blink on load) -->
@@ -34,6 +52,11 @@
                     <h3>Comments</h3>
                     <span class="comment-count">0</span>
                 </div>
+                <button class="panel-minimize-btn" title="Minimize panel">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="m6 9 6 6 6-6"/>
+                    </svg>
+                </button>
                 <button class="panel-resize-btn" title="Resize panel">
                     <svg
                         xmlns="http://www.w3.org/2000/svg"

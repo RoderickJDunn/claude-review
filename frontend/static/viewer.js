@@ -97,6 +97,7 @@
 
     function init() {
         initTextSelection();
+        initCopyButton();
         createCommentButton();
         createCommentPopup();
         createCommentPanel();
@@ -120,6 +121,74 @@
 
         // Expose confirm dialog globally for editor.js
         window.showConfirmDialog = showConfirmDialog;
+    }
+
+    function initCopyButton() {
+        const btn = document.getElementById('copy-markdown-btn');
+        if (!btn) return;
+
+        // Pre-fetch markdown so the tap handler can copy synchronously
+        // (iOS Safari requires clipboard ops within the user gesture)
+        let cachedMarkdown = null;
+        const params = new URLSearchParams({
+            project_directory: projectDir,
+            file_path: filePath,
+        });
+        fetch('/api/content?' + params)
+            .then(r => r.ok ? r.text() : Promise.reject('fetch failed'))
+            .then(md => { cachedMarkdown = md; })
+            .catch(err => console.error('Pre-fetch markdown failed:', err));
+
+        btn.addEventListener('click', async () => {
+            try {
+                let markdown = cachedMarkdown;
+                if (!markdown) {
+                    const resp = await fetch('/api/content?' + params);
+                    if (!resp.ok) throw new Error('Failed to fetch');
+                    markdown = await resp.text();
+                    cachedMarkdown = markdown;
+                }
+                await copyToClipboard(markdown);
+
+                btn.classList.add('copied');
+                btn.querySelector('.copy-label').textContent = 'Copied!';
+                setTimeout(() => {
+                    btn.classList.remove('copied');
+                    btn.querySelector('.copy-label').textContent = 'Copy';
+                }, 2000);
+            } catch (err) {
+                console.error('Copy failed:', err);
+            }
+        });
+    }
+
+    // Clipboard API requires HTTPS; fall back to execCommand for HTTP/local.
+    // iOS Safari needs special handling: the element must be in-viewport,
+    // readOnly must be false, and setSelectionRange is required.
+    async function copyToClipboard(text) {
+        if (navigator.clipboard && window.isSecureContext) {
+            return navigator.clipboard.writeText(text);
+        }
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.readOnly = false;
+        textarea.contentEditable = 'true';
+        textarea.style.position = 'fixed';
+        textarea.style.top = '0';
+        textarea.style.left = '0';
+        textarea.style.width = '1px';
+        textarea.style.height = '1px';
+        textarea.style.padding = '0';
+        textarea.style.border = 'none';
+        textarea.style.outline = 'none';
+        textarea.style.background = 'transparent';
+        textarea.style.clip = 'rect(0,0,0,0)';
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.setSelectionRange(0, text.length);
+        const ok = document.execCommand('copy');
+        document.body.removeChild(textarea);
+        if (!ok) throw new Error('execCommand copy failed');
     }
 
     function initTextSelection() {
@@ -248,9 +317,11 @@
             return;
         }
 
-        // Restore panel state from localStorage, default to 'expanded'
-        const savedState = localStorage.getItem('claude-review-panel-state') || 'expanded';
-        commentPanel.className = savedState + ' ready';
+        // On mobile (< 768px), default to collapsed unless user explicitly saved a state
+        const isMobile = window.innerWidth < 768;
+        const savedState = localStorage.getItem('claude-review-panel-state');
+        const defaultState = isMobile ? 'collapsed' : 'expanded';
+        commentPanel.className = (savedState || defaultState) + ' ready';
 
         // Click on resize button to cycle through widths
         commentPanel.querySelector('.panel-resize-btn').addEventListener('click', (e) => {
@@ -261,6 +332,23 @@
                 savePanelState('expanded-wide');
             } else if (commentPanel.classList.contains('expanded-wide')) {
                 commentPanel.classList.remove('expanded-wide');
+                commentPanel.classList.add('expanded');
+                savePanelState('expanded');
+            }
+        });
+
+        // Minimize button collapses the panel
+        commentPanel.querySelector('.panel-minimize-btn').addEventListener('click', (e) => {
+            e.stopPropagation();
+            commentPanel.classList.remove('expanded', 'expanded-wide');
+            commentPanel.classList.add('collapsed');
+            savePanelState('collapsed');
+        });
+
+        // Click on collapsed panel header to expand
+        commentPanel.querySelector('.comment-panel-header').addEventListener('click', () => {
+            if (commentPanel.classList.contains('collapsed')) {
+                commentPanel.classList.remove('collapsed');
                 commentPanel.classList.add('expanded');
                 savePanelState('expanded');
             }

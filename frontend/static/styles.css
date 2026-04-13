@@ -173,6 +173,56 @@ ul.contains-task-list li {
     margin-bottom: 20px;
     font-size: 14px;
     color: #586069;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0;
+}
+
+.copy-markdown-btn {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 8px;
+    border: 1px solid #d1d5da;
+    border-radius: 4px;
+    background: #fafbfc;
+    color: #586069;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+}
+
+.copy-markdown-btn:hover {
+    background: #e1e4e8;
+    color: #24292e;
+}
+
+.copy-markdown-btn.copied {
+    background: #2ea44f;
+    border-color: #2ea44f;
+    color: white;
+}
+
+@media (max-width: 767px) {
+    .copy-markdown-btn {
+        position: fixed;
+        top: 20px;
+        left: 20px;
+        z-index: 901;
+        margin-left: 0;
+        padding: 8px 14px;
+        font-size: 14px;
+        border-radius: 6px;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+    }
+
+    .copy-markdown-btn svg {
+        width: 16px;
+        height: 16px;
+    }
 }
 
 .breadcrumb a {
@@ -433,6 +483,7 @@ ul.contains-task-list li {
 
 #comment-panel.collapsed .comment-panel-header {
     border-bottom: none;
+    cursor: pointer;
 }
 
 #comment-panel.collapsed .comment-panel-header h3 {
@@ -440,6 +491,10 @@ ul.contains-task-list li {
 }
 
 #comment-panel.collapsed .panel-resize-btn {
+    display: none;
+}
+
+#comment-panel.collapsed .panel-minimize-btn {
     display: none;
 }
 
@@ -475,6 +530,7 @@ ul.contains-task-list li {
     color: #24292e;
 }
 
+.panel-minimize-btn,
 .panel-resize-btn {
     padding: 4px;
     border: 1px solid #d1d5da;
@@ -488,6 +544,7 @@ ul.contains-task-list li {
     justify-content: center;
 }
 
+.panel-minimize-btn:hover,
 .panel-resize-btn:hover {
     background-color: #e1e4e8;
     color: #24292e;
@@ -906,6 +963,10 @@ ul.contains-task-list li {
     padding: 8px 0;
     margin-bottom: 8px;
     border-bottom: 1px solid #e1e4e8;
+    position: sticky;
+    top: 0;
+    background: #fff;
+    z-index: 50;
 }
 
 .editor-mode-label {
@@ -913,6 +974,37 @@ ul.contains-task-list li {
     font-size: 14px;
     color: #0366d6;
     margin-right: auto;
+}
+
+.editor-format-group {
+    display: flex;
+    gap: 2px;
+    margin-right: 8px;
+    padding-right: 12px;
+    border-right: 1px solid #e1e4e8;
+}
+
+.editor-format-btn {
+    padding: 2px 6px;
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1.4;
+    color: #586069;
+    background: #f6f8fa;
+    border: 1px solid #d1d5da;
+    border-radius: 3px;
+    cursor: pointer;
+}
+
+.editor-format-btn:hover {
+    background: #e1e4e8;
+    color: #24292e;
+}
+
+.editor-format-btn.active {
+    background: #0366d6;
+    color: #fff;
+    border-color: #0366d6;
 }
 
 .editor-hint {
