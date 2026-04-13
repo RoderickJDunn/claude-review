@@ -172,6 +172,7 @@
         if (window.crNav.editMode) return;
         if (window.crNavUtils && window.crNavUtils.isInputFocused()) return;
         if (e.key !== 'c' && e.key !== 's') return;
+        if (e.metaKey || e.ctrlKey || e.altKey) return;
 
         const nav = window.crNav;
         if (!nav.active || !nav.cursor) return;
