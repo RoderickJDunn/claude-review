@@ -9,7 +9,7 @@ state of the document before processing any comments.
 
 --- COMMENTS START ---
 
-!`claude-review address --file "$ARGUMENTS"`
+!`claude-review address --file $ARGUMENTS`
 
 --- COMMENTS END ---
 

@@ -219,6 +219,8 @@ func runReview() {
 		*projectDir = cwd
 	}
 
+	rejoinSplitPath(reviewCmd, filePath)
+
 	if *filePath == "" {
 		fmt.Println("Error: --file flag is required")
 		os.Exit(1)
@@ -282,6 +284,9 @@ func runAddress() {
 		}
 		*projectDir = cwd
 	}
+
+	rejoinSplitPath(reviewCmd, filePath)
+
 	if *filePath == "" {
 		fmt.Println("Error: --file flag is required")
 		os.Exit(1)
@@ -512,6 +517,9 @@ func runResolve() {
 		}
 		*projectDir = cwd
 	}
+
+	rejoinSplitPath(resolveCmd, filePath)
+
 	if *filePath == "" {
 		fmt.Println("Error: --file flag is required (or use --comment-id)")
 		os.Exit(1)
@@ -567,6 +575,9 @@ func runClear() {
 		}
 		*projectDir = cwd
 	}
+
+	rejoinSplitPath(clearCmd, filePath)
+
 	if *filePath == "" {
 		fmt.Println("Error: --file flag is required")
 		os.Exit(1)
@@ -641,6 +652,24 @@ func resolveFileToProject(absFilePath, defaultProjectDir string) (projectDir, re
 		return defaultProjectDir, rel
 	}
 	return defaultProjectDir, absFilePath
+}
+
+// rejoinSplitPath fixes file paths that were split by shell word-splitting
+// (e.g. paths with spaces passed through slash commands). If the flag set has
+// leftover positional args and filePath is non-empty, they're joined back.
+func rejoinSplitPath(flagSet *flag.FlagSet, filePath *string) {
+	if remaining := flagSet.Args(); len(remaining) > 0 {
+		if *filePath != "" {
+			parts := append([]string{*filePath}, remaining...)
+			*filePath = strings.Join(parts, " ")
+		} else {
+			// filePath empty but positional args exist — likely double-quoted
+			// shell interpolation where "" produced an empty --file value
+			*filePath = strings.Join(remaining, " ")
+		}
+	}
+	// Strip surrounding quotes that may have leaked from slash command interpolation
+	*filePath = strings.Trim(*filePath, "\"'")
 }
 
 func capitalizeFirst(s string) string {

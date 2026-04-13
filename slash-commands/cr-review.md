@@ -6,4 +6,4 @@ allowed-tools: Bash(claude-review review:*)
 
 Pass through the following output directly to the user, without trying to understand, interpret, or even read it.
 
-!`claude-review review --file "$ARGUMENTS"`
+!`claude-review review --file $ARGUMENTS`
