@@ -362,6 +362,79 @@
 
     function onContentInput() {
         isDirty = true;
+        if (mode === 'rich') handleMarkdownShortcuts();
+    }
+
+    /** Detect `# `, `## `, `### ` typed at the start of a block and convert to heading. */
+    function handleMarkdownShortcuts() {
+        const content = document.getElementById('markdown-content');
+        const sel = window.getSelection();
+        if (!content || !sel || sel.rangeCount === 0) return;
+
+        let node = sel.anchorNode;
+        if (!node) return;
+        const textNode = node.nodeType === Node.TEXT_NODE ? node : null;
+        if (node.nodeType === Node.TEXT_NODE) node = node.parentNode;
+
+        // Walk up to direct child of #markdown-content
+        while (node && node.parentNode !== content) {
+            node = node.parentNode;
+        }
+        if (!node || node.parentNode !== content) return;
+
+        // Only trigger on paragraph-like elements, not if already a heading
+        const tag = node.tagName.toLowerCase();
+        if (tag.match(/^h[1-6]$/)) return;
+
+        // Get text content of the block and check for heading prefix
+        const text = node.textContent;
+        const match = text.match(/^(#{1,3}) /);
+        if (!match) return;
+
+        const level = match[1].length; // 1, 2, or 3
+        const headingTag = 'h' + level;
+        const prefix = match[0]; // e.g. "## "
+
+        // Remove the prefix from the DOM text
+        // Walk text nodes to find and strip the prefix
+        const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+        let remaining = prefix.length;
+        const nodesToTrim = [];
+        while (remaining > 0) {
+            const tn = walker.nextNode();
+            if (!tn) break;
+            const take = Math.min(tn.length, remaining);
+            nodesToTrim.push({ node: tn, chars: take });
+            remaining -= take;
+        }
+        nodesToTrim.forEach(({ node: tn, chars }) => {
+            tn.deleteData(0, chars);
+        });
+
+        // Convert the block to a heading
+        const newEl = document.createElement(headingTag);
+        while (node.firstChild) {
+            newEl.appendChild(node.firstChild);
+        }
+        Array.from(node.attributes).forEach(attr => {
+            if (attr.name.startsWith('data-')) {
+                newEl.setAttribute(attr.name, attr.value);
+            }
+        });
+        content.replaceChild(newEl, node);
+
+        // Place caret at the start of the new heading
+        const range = document.createRange();
+        if (newEl.firstChild) {
+            range.setStart(newEl.firstChild, 0);
+        } else {
+            range.selectNodeContents(newEl);
+        }
+        range.collapse(true);
+        sel.removeAllRanges();
+        sel.addRange(range);
+
+        updateFormatButtonState();
     }
 
     function toggleRawRich() {
