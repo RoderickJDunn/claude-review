@@ -506,6 +506,16 @@
             contentDiv.appendChild(textDiv);
         }
 
+        // Show a verb badge for annotations with a verb set. Quick-react
+        // verbs (agree/reject) often have empty comment_text, so without this
+        // badge they'd render blank in the panel.
+        if (isRoot && comment.verb) {
+            const verbDiv = document.createElement('div');
+            verbDiv.className = 'thread-item-verb verb-' + comment.verb;
+            verbDiv.textContent = verbLabel(comment.verb);
+            contentDiv.appendChild(verbDiv);
+        }
+
         const commentDiv = document.createElement('div');
         commentDiv.className = 'thread-item-comment';
 
@@ -577,6 +587,16 @@
     function capitalizeFirst(s) {
         if (!s) return '';
         return s.charAt(0).toUpperCase() + s.slice(1);
+    }
+
+    function verbLabel(verb) {
+        switch (verb) {
+            case 'agree': return '✓ Agreed';
+            case 'reject': return '✗ Skip';
+            case 'question': return '? Question';
+            case 'comment': return '💬 Comment';
+            default: return verb;
+        }
     }
 
     function formatRelativeTime(timestamp) {

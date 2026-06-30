@@ -23,6 +23,8 @@
         if (!inScratchMode()) return;
 
         wireSendButton();
+        renameCommentPanel();
+        buildStagedPanel();
         document.addEventListener('keydown', handleAnnotateKey, true);
 
         // Mirror the keyboard-comments Tab/Esc convention: clear staging on Esc
@@ -36,6 +38,11 @@
                 e.preventDefault();
             }
         });
+    }
+
+    function renameCommentPanel() {
+        const header = document.querySelector('#comment-panel .comment-panel-header-left h3');
+        if (header) header.textContent = 'Annotations';
     }
 
     function wireSendButton() {
@@ -123,8 +130,12 @@
     function stageCurrentSelection() {
         const sel = currentSelectionRange();
         if (!sel) return;
+        // Wrap the range in a persistent marker so the user can see what's
+        // staged. surroundContents() throws if the range crosses block
+        // boundaries; in that case we fall back to wrapping each
+        // contained text node individually.
+        sel.markers = markStagedRange(sel.range);
         stagedRanges.push(sel);
-        flashStaging(sel.range);
         // Reset selection scope so the user can navigate to the next one.
         const nav = window.crNav;
         if (nav) {
@@ -137,36 +148,147 @@
         if (window.crSelection && window.crSelection.clearSelectionHighlight) {
             window.crSelection.clearSelectionHighlight();
         }
-        announce(`Staged ${stagedRanges.length} selection${stagedRanges.length === 1 ? '' : 's'}. Press 'a' / 'x' / '?' / 'c' to apply, or 'm' to add more.`);
-    }
-
-    function flashStaging(range) {
-        try {
-            const rects = range.getClientRects();
-            for (const rect of rects) {
-                const overlay = document.createElement('div');
-                overlay.className = 'staged-range-flash';
-                overlay.style.position = 'fixed';
-                overlay.style.left = rect.left + 'px';
-                overlay.style.top = rect.top + 'px';
-                overlay.style.width = rect.width + 'px';
-                overlay.style.height = rect.height + 'px';
-                overlay.style.pointerEvents = 'none';
-                overlay.style.background = 'rgba(255, 235, 153, 0.5)';
-                overlay.style.zIndex = '9999';
-                overlay.style.transition = 'opacity 0.6s ease-out';
-                document.body.appendChild(overlay);
-                requestAnimationFrame(() => { overlay.style.opacity = '0'; });
-                setTimeout(() => overlay.remove(), 700);
-            }
-        } catch (e) {
-            // ignore — just a visual cue
-        }
+        renderStagedPanel();
+        announce(`Staged ${stagedRanges.length}. Press 'a' / 'x' / '?' / 'c' to apply, 'm' to add more.`);
     }
 
     function clearStaging() {
+        for (const r of stagedRanges) {
+            unmarkStaged(r);
+        }
         stagedRanges.length = 0;
+        renderStagedPanel();
         announce('Staged selections cleared.');
+    }
+
+    function removeStagedAt(index) {
+        const r = stagedRanges[index];
+        if (!r) return;
+        unmarkStaged(r);
+        stagedRanges.splice(index, 1);
+        renderStagedPanel();
+    }
+
+    // markStagedRange wraps the range's content in <span class="staged-range">
+    // so the user can see it persistently. Returns the wrapper element(s).
+    function markStagedRange(range) {
+        try {
+            const wrapper = document.createElement('span');
+            wrapper.className = 'staged-range';
+            range.surroundContents(wrapper);
+            return [wrapper];
+        } catch (e) {
+            // Range crosses element boundaries — wrap each text node it
+            // partially or fully covers, instead.
+            return wrapTextNodesInRange(range);
+        }
+    }
+
+    function wrapTextNodesInRange(range) {
+        const wrappers = [];
+        const root = range.commonAncestorContainer;
+        const walker = document.createTreeWalker(
+            root.nodeType === Node.ELEMENT_NODE ? root : root.parentNode,
+            NodeFilter.SHOW_TEXT,
+            {
+                acceptNode(node) {
+                    return range.intersectsNode(node)
+                        ? NodeFilter.FILTER_ACCEPT
+                        : NodeFilter.FILTER_REJECT;
+                },
+            }
+        );
+        const nodes = [];
+        let n = walker.nextNode();
+        while (n) { nodes.push(n); n = walker.nextNode(); }
+        for (const textNode of nodes) {
+            const wrapper = document.createElement('span');
+            wrapper.className = 'staged-range';
+            // Only the portion of this text node inside the range is staged;
+            // split off the leading/trailing bits if necessary.
+            let target = textNode;
+            const nodeRange = document.createRange();
+            nodeRange.selectNodeContents(textNode);
+            let start = 0;
+            let end = textNode.nodeValue.length;
+            if (range.startContainer === textNode) start = range.startOffset;
+            if (range.endContainer === textNode) end = range.endOffset;
+            if (end < textNode.nodeValue.length) {
+                target.splitText(end);
+            }
+            if (start > 0) {
+                target = target.splitText(start);
+            }
+            const parent = target.parentNode;
+            parent.insertBefore(wrapper, target);
+            wrapper.appendChild(target);
+            wrappers.push(wrapper);
+        }
+        return wrappers;
+    }
+
+    function unmarkStaged(stagedEntry) {
+        if (!stagedEntry.markers) return;
+        for (const wrapper of stagedEntry.markers) {
+            if (!wrapper || !wrapper.parentNode) continue;
+            const parent = wrapper.parentNode;
+            while (wrapper.firstChild) {
+                parent.insertBefore(wrapper.firstChild, wrapper);
+            }
+            parent.removeChild(wrapper);
+            parent.normalize(); // merge adjacent text nodes we split apart
+        }
+        stagedEntry.markers = null;
+    }
+
+    // Persistent staged-pill panel — always present but hidden when empty.
+    let stagedPanel = null;
+    function buildStagedPanel() {
+        stagedPanel = document.createElement('div');
+        stagedPanel.id = 'annotate-staged-panel';
+        stagedPanel.style.display = 'none';
+        stagedPanel.innerHTML = `
+            <div class="staged-panel-header">
+                <span class="staged-panel-title">Staged</span>
+                <span class="staged-panel-count">0</span>
+                <button class="staged-panel-clear" type="button" title="Clear all (Esc)">Clear</button>
+            </div>
+            <div class="staged-panel-list"></div>
+            <div class="staged-panel-hint">Press a / x / ? / c to apply to all staged</div>
+        `;
+        document.body.appendChild(stagedPanel);
+        stagedPanel.querySelector('.staged-panel-clear').addEventListener('click', clearStaging);
+    }
+
+    function renderStagedPanel() {
+        if (!stagedPanel) return;
+        if (stagedRanges.length === 0) {
+            stagedPanel.style.display = 'none';
+            return;
+        }
+        stagedPanel.style.display = 'block';
+        stagedPanel.querySelector('.staged-panel-count').textContent = stagedRanges.length;
+        const list = stagedPanel.querySelector('.staged-panel-list');
+        list.innerHTML = '';
+        stagedRanges.forEach((r, i) => {
+            const chip = document.createElement('div');
+            chip.className = 'staged-chip';
+            const text = (r.text || '').replace(/\s+/g, ' ').trim();
+            const truncated = text.length > 60 ? text.slice(0, 57) + '…' : text;
+            const label = document.createElement('span');
+            label.className = 'staged-chip-text';
+            label.textContent = truncated;
+            label.title = text;
+            const remove = document.createElement('button');
+            remove.className = 'staged-chip-remove';
+            remove.type = 'button';
+            remove.textContent = '×';
+            remove.title = 'Remove from staging';
+            remove.addEventListener('click', () => removeStagedAt(i));
+            chip.appendChild(label);
+            chip.appendChild(remove);
+            list.appendChild(chip);
+        });
     }
 
     function buildPayload(verb, body) {
@@ -218,7 +340,10 @@
             const saved = await resp.json();
             comments = comments || [];
             comments.push(saved);
+            // Unmark and clear any staged ranges that were just consumed.
+            for (const r of stagedRanges) unmarkStaged(r);
             stagedRanges.length = 0;
+            renderStagedPanel();
             // Reset selection scope post-action.
             const nav = window.crNav;
             if (nav) {
@@ -261,7 +386,10 @@
 
         viewer.setCurrentSelection(root);
         installVerbPatch(verb, extras);
+        // Drop staging markers — the verb is now committed via the popup path.
+        for (const r of stagedRanges) unmarkStaged(r);
         stagedRanges.length = 0;
+        renderStagedPanel();
 
         // Position the popup near the root selection.
         const range = root.range;
