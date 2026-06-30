@@ -86,14 +86,17 @@
         switch (e.key) {
             case 'a':
                 e.preventDefault();
+                expandToSentenceIfBareWord();
                 quickReact('agree');
                 break;
             case 'x':
                 e.preventDefault();
+                expandToSentenceIfBareWord();
                 quickReact('reject');
                 break;
             case '?':
                 e.preventDefault();
+                expandToSentenceIfBareWord();
                 openVerbComment('question');
                 break;
             // 'c' is already handled by keyboard-comments.js for free comments;
@@ -102,6 +105,22 @@
                 e.preventDefault();
                 stageCurrentSelection();
                 break;
+        }
+    }
+
+    // expandToSentenceIfBareWord broadens a single-word cursor selection to
+    // sentence scope before a verb is applied — annotating just the word the
+    // cursor happens to sit on rarely matches user intent. Larger selections
+    // (clause / sentence / paragraph / block) and staged multi-select are
+    // left alone: the user has already made their target explicit.
+    function expandToSentenceIfBareWord() {
+        if (stagedRanges.length > 0) return;
+        const nav = window.crNav;
+        if (!nav || !nav.selection) return;
+        if (nav.selection.level > 0 && nav.selection.range) return;
+        nav.selection.level = 2; // sentence
+        if (window.crSelection && window.crSelection.applySelectionLevel) {
+            window.crSelection.applySelectionLevel();
         }
     }
 
