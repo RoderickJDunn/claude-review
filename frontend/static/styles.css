@@ -1052,3 +1052,31 @@ ul.contains-task-list li {
     user-select: none;
     pointer-events: none;
 }
+
+/* Inline annotation (scratch) mode */
+.scratch-label {
+    font-weight: 500;
+    color: #555;
+    margin-right: 8px;
+}
+
+body[data-scratch-mode="true"] #scratch-send-btn {
+    margin-left: auto;
+}
+
+.scratch-committed {
+    text-align: center;
+    padding: 2em;
+    color: #333;
+}
+
+.scratch-committed h2 {
+    color: #2e7d32;
+}
+
+.scratch-committed pre {
+    text-align: left;
+    max-width: 700px;
+    margin: 1em auto;
+    overflow-x: auto;
+}

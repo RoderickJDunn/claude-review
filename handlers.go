@@ -9,7 +9,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -185,6 +187,138 @@ func renderViewer(w http.ResponseWriter, r *http.Request, projectDir, filePath s
 	}
 }
 
+func handleScratchViewer(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	sess := getScratchSession(id)
+	if sess == nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	html, err := RenderMarkdownWithLineNumbers([]byte(sess.Content))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	comments, err := getComments(scratchProjectDir, id, false)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := renderCommentsAsHTML(comments); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	data := map[string]interface{}{
+		"ProjectDir":   scratchProjectDir,
+		"FilePath":     id,
+		"HTMLContent":  template.HTML(html),
+		"Comments":     comments,
+		"Version":      Version,
+		"CommitHash":   CommitHash,
+		"ScratchMode":  true,
+		"ScratchID":    id,
+		"ScratchLabel": sess.Label,
+	}
+
+	if err := templates.ExecuteTemplate(w, "viewer.html", data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+// handleCreateScratch creates a new scratch session and returns its URL plus ID.
+func handleCreateScratch(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Content string `json:"content"`
+		Label   string `json:"label"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Content == "" {
+		http.Error(w, "content is required", http.StatusBadRequest)
+		return
+	}
+
+	sess, err := createScratchSession(req.Content, req.Label)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	port := os.Getenv("CR_LISTEN_PORT")
+	if port == "" {
+		port = "4779"
+	}
+	resp := map[string]interface{}{
+		"id":  sess.ID,
+		"url": fmt.Sprintf("http://localhost:%s/scratch/%s", port, sess.ID),
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// handleCommitScratch fires the commit signal for a scratch session. The
+// blocking CLI client gets unblocked and receives the rendered output. The
+// browser receives the same rendered text so it can display a confirmation.
+func handleCommitScratch(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	rendered, err := commitScratchSession(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"status":   "committed",
+		"rendered": rendered,
+	})
+}
+
+// handleAwaitScratch long-polls for the session to be committed. The CLI uses
+// this to block until the browser ⌘↩ trigger fires. Default timeout 60s; the
+// CLI loops as needed.
+func handleAwaitScratch(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if getScratchSession(id) == nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	timeout := 60 * time.Second
+	if t := r.URL.Query().Get("timeout"); t != "" {
+		if secs, err := strconv.Atoi(t); err == nil && secs > 0 {
+			timeout = time.Duration(secs) * time.Second
+		}
+	}
+
+	rendered, ok := waitForScratchCommit(id, timeout)
+	w.Header().Set("Content-Type", "application/json")
+	if !ok {
+		w.WriteHeader(http.StatusRequestTimeout)
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "timeout"})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"status":   "committed",
+		"rendered": rendered,
+	})
+}
+
+// handleDeleteScratch removes a scratch session and its comments. Called by
+// the CLI after the rendered output is delivered, so the daemon doesn't
+// accumulate ephemeral data.
+func handleDeleteScratch(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	_, _ = deleteAllComments(scratchProjectDir, id)
+	deleteScratchSession(id)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+}
+
 var skipDirs = map[string]bool{
 	".git":          true,
 	"node_modules":  true,
@@ -326,9 +460,20 @@ func handleCreateComment(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if comment.CommentText == "" {
+	// CommentText is required EXCEPT for quick-reaction verbs (agree/reject)
+	// which carry meaning even without free-form text.
+	if comment.CommentText == "" && comment.Verb != "agree" && comment.Verb != "reject" {
 		http.Error(w, "comment_text is required", http.StatusBadRequest)
 		return
+	}
+
+	if comment.Verb != "" {
+		switch comment.Verb {
+		case "agree", "reject", "question", "comment":
+		default:
+			http.Error(w, "verb must be one of agree|reject|question|comment", http.StatusBadRequest)
+			return
+		}
 	}
 
 	// Default author to 'user' if not provided (for API calls from web UI)

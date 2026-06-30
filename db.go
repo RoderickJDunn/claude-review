@@ -39,6 +39,21 @@ type Comment struct {
 	RootID           *int       `json:"root_id,omitempty"`
 	Author           string     `json:"author"`
 	ResolvedBy       *string    `json:"resolved_by,omitempty"`
+	// Verb is one of "agree", "reject", "question", "comment" — drives the
+	// render-to-chat output. Empty means generic free-form comment.
+	Verb string `json:"verb,omitempty"`
+	// ExtraRanges holds additional quoted selections for multi-select threads
+	// stored as JSON. Each entry: {"line_start":N,"line_end":N,"selected_text":"..."}
+	ExtraRanges string `json:"extra_ranges,omitempty"`
+}
+
+// ExtraRange is one of the additional quoted selections attached to a multi-
+// select thread. It mirrors the root selection but is stored as JSON in
+// Comment.ExtraRanges so we don't need a separate table.
+type ExtraRange struct {
+	LineStart    int    `json:"line_start"`
+	LineEnd      int    `json:"line_end"`
+	SelectedText string `json:"selected_text"`
 }
 
 var db *sql.DB
@@ -100,6 +115,8 @@ func initDB() error {
 		root_id INTEGER REFERENCES comments(id) ON DELETE CASCADE,
 		author TEXT CHECK(author IN ('user', 'agent')),
 		resolved_by TEXT,
+		verb TEXT,
+		extra_ranges TEXT,
 		FOREIGN KEY (project_directory) REFERENCES projects(directory)
 	);
 
@@ -112,7 +129,32 @@ func initDB() error {
 		return fmt.Errorf("failed to create schema: %w", err)
 	}
 
+	// Migrations for columns added after initial schema. SQLite has no
+	// IF NOT EXISTS for ALTER TABLE ADD COLUMN, so probe pragma_table_info.
+	if err := addColumnIfMissing("comments", "verb", "TEXT"); err != nil {
+		return fmt.Errorf("failed to add verb column: %w", err)
+	}
+	if err := addColumnIfMissing("comments", "extra_ranges", "TEXT"); err != nil {
+		return fmt.Errorf("failed to add extra_ranges column: %w", err)
+	}
+
 	return nil
+}
+
+func addColumnIfMissing(table, column, decl string) error {
+	var count int
+	err := db.QueryRow(
+		"SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?",
+		table, column,
+	).Scan(&count)
+	if err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil
+	}
+	_, err = db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, decl))
+	return err
 }
 
 func createProject(directory string) (*Project, error) {
@@ -162,8 +204,10 @@ func createComment(c *Comment) error {
 	c.CreatedAt = time.Now()
 
 	query := `
-		INSERT INTO comments (project_directory, file_path, line_start, line_end, selected_text, comment_text, root_id, author, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		INSERT INTO comments (project_directory, file_path, line_start, line_end, selected_text, comment_text, root_id, author, created_at, verb, extra_ranges)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	verb := nullableString(c.Verb)
+	extraRanges := nullableString(c.ExtraRanges)
 	logQuery(
 		query,
 		c.ProjectDirectory,
@@ -175,6 +219,8 @@ func createComment(c *Comment) error {
 		c.RootID,
 		c.Author,
 		c.CreatedAt,
+		verb,
+		extraRanges,
 	)
 	result, err := db.Exec(
 		query,
@@ -187,6 +233,8 @@ func createComment(c *Comment) error {
 		c.RootID,
 		c.Author,
 		c.CreatedAt,
+		verb,
+		extraRanges,
 	)
 	if err != nil {
 		return err
@@ -201,17 +249,24 @@ func createComment(c *Comment) error {
 	return nil
 }
 
+func nullableString(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
 func getComments(projectDir, filePath string, resolved bool) ([]Comment, error) {
 	var query string
 	if resolved {
 		query = `
-			SELECT id, project_directory, file_path, line_start, line_end, selected_text, comment_text, created_at, resolved_at, root_id, author, resolved_by
+			SELECT id, project_directory, file_path, line_start, line_end, selected_text, comment_text, created_at, resolved_at, root_id, author, resolved_by, verb, extra_ranges
 			FROM comments
 			WHERE project_directory = ? AND file_path = ? AND resolved_at IS NOT NULL
 			ORDER BY COALESCE(root_id, id) ASC, created_at ASC`
 	} else {
 		query = `
-			SELECT id, project_directory, file_path, line_start, line_end, selected_text, comment_text, created_at, resolved_at, root_id, author, resolved_by
+			SELECT id, project_directory, file_path, line_start, line_end, selected_text, comment_text, created_at, resolved_at, root_id, author, resolved_by, verb, extra_ranges
 			FROM comments
 			WHERE project_directory = ? AND file_path = ? AND resolved_at IS NULL
 			ORDER BY COALESCE(root_id, id) ASC, created_at ASC`
@@ -226,9 +281,12 @@ func getComments(projectDir, filePath string, resolved bool) ([]Comment, error) 
 	var comments []Comment
 	for rows.Next() {
 		var c Comment
-		if err := rows.Scan(&c.ID, &c.ProjectDirectory, &c.FilePath, &c.LineStart, &c.LineEnd, &c.SelectedText, &c.CommentText, &c.CreatedAt, &c.ResolvedAt, &c.RootID, &c.Author, &c.ResolvedBy); err != nil {
+		var verb, extraRanges sql.NullString
+		if err := rows.Scan(&c.ID, &c.ProjectDirectory, &c.FilePath, &c.LineStart, &c.LineEnd, &c.SelectedText, &c.CommentText, &c.CreatedAt, &c.ResolvedAt, &c.RootID, &c.Author, &c.ResolvedBy, &verb, &extraRanges); err != nil {
 			return nil, err
 		}
+		c.Verb = verb.String
+		c.ExtraRanges = extraRanges.String
 		comments = append(comments, c)
 	}
 
@@ -293,16 +351,17 @@ func resolveComments(projectDir, filePath string) (int, error) {
 
 func getCommentByID(commentID int) (*Comment, error) {
 	query := `
-		SELECT id, project_directory, file_path, line_start, line_end, selected_text, comment_text, created_at, resolved_at, root_id, author, resolved_by
+		SELECT id, project_directory, file_path, line_start, line_end, selected_text, comment_text, created_at, resolved_at, root_id, author, resolved_by, verb, extra_ranges
 		FROM comments
 		WHERE id = ?`
 	logQuery(query, commentID)
 
 	var c Comment
+	var verb, extraRanges sql.NullString
 	err := db.QueryRow(query, commentID).Scan(
 		&c.ID, &c.ProjectDirectory, &c.FilePath, &c.LineStart, &c.LineEnd,
 		&c.SelectedText, &c.CommentText, &c.CreatedAt,
-		&c.ResolvedAt, &c.RootID, &c.Author, &c.ResolvedBy,
+		&c.ResolvedAt, &c.RootID, &c.Author, &c.ResolvedBy, &verb, &extraRanges,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -310,6 +369,8 @@ func getCommentByID(commentID int) (*Comment, error) {
 	if err != nil {
 		return nil, err
 	}
+	c.Verb = verb.String
+	c.ExtraRanges = extraRanges.String
 
 	return &c, nil
 }

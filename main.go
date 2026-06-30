@@ -28,6 +28,9 @@ func main() {
 		fmt.Println("  reply                    Reply to a comment thread")
 		fmt.Println("  resolve                  Mark comments as resolved")
 		fmt.Println("  clear                    Delete all comments for a file")
+		fmt.Println("  scratch                  Open a scratch annotation buffer in the browser")
+		fmt.Println("  annotate-clipboard       Annotate clipboard contents and write result back")
+		fmt.Println("  annotate-session         Annotate the most recent assistant message from a Claude Code session")
 		fmt.Println("  install                  Install slash commands")
 		fmt.Println("  uninstall                Uninstall slash commands")
 		fmt.Println("  version                  Show version information")
@@ -51,6 +54,12 @@ func main() {
 		runResolve()
 	case "clear":
 		runClear()
+	case "scratch":
+		runScratch()
+	case "annotate-clipboard":
+		runAnnotateClipboard()
+	case "annotate-session":
+		runAnnotateSession()
 	case "install":
 		runInstall()
 	case "uninstall":
@@ -136,6 +145,7 @@ func runServer() {
 	// HTML Routes
 	r.Get("/", handleHome)
 	r.Get("/projects/*", handleProjectFiles)
+	r.Get("/scratch/{id}", handleScratchViewer)
 
 	// API Routes
 	r.Post("/api/comments", handleCreateComment)
@@ -146,6 +156,15 @@ func runServer() {
 	r.Post("/api/events", handleBroadcast)
 	r.Get("/api/content", handleGetContent)
 	r.Put("/api/content", handleSaveContent)
+
+	// Scratch endpoints (ephemeral annotation sessions)
+	r.Post("/api/scratch", handleCreateScratch)
+	r.Post("/api/scratch/{id}/commit", handleCommitScratch)
+	r.Get("/api/scratch/{id}/await", handleAwaitScratch)
+	r.Delete("/api/scratch/{id}", handleDeleteScratch)
+
+	// Start scratch garbage collector
+	startScratchGC()
 
 	// Static files from embedded FS
 	staticSubFS, err := fs.Sub(staticFS, "frontend/static")
