@@ -15,6 +15,12 @@
     // { text, lineStart, lineEnd, range }.
     const stagedRanges = [];
 
+    // Persistent staged-pill panel — built lazily in init(). Declared here at
+    // the top of the IIFE so init() (which may run synchronously when this
+    // script loads after DOMContentLoaded) doesn't hit a temporal-dead-zone
+    // error referencing it via buildStagedPanel().
+    let stagedPanel = null;
+
     function inScratchMode() {
         return !!(window.crScratch && window.crScratch.id);
     }
@@ -245,7 +251,6 @@
     }
 
     // Persistent staged-pill panel — always present but hidden when empty.
-    let stagedPanel = null;
     function buildStagedPanel() {
         stagedPanel = document.createElement('div');
         stagedPanel.id = 'annotate-staged-panel';
