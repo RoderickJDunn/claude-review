@@ -440,9 +440,116 @@ func resolveTranscriptPath(projectDir, sessionID string) (string, error) {
 	if path, ok := newestJSONL(primaryProjectsDir); ok {
 		return path, nil
 	}
+
+	// Last resort: find the .jsonl whose most recent user entry contains a
+	// /annotate invocation. This identifies the current session uniquely
+	// even when env vars aren't passed through — concurrent sessions can be
+	// disambiguated because only the one that just triggered /annotate has
+	// that as its last user entry.
+	if path, ok := findSessionByLastUserPrompt(home, "/annotate"); ok {
+		return path, nil
+	}
+
 	return "", fmt.Errorf("no .jsonl transcripts under %s. "+
 		"If you are running multiple Claude Code sessions, set $CLAUDE_SESSION_ID "+
 		"or pass --session-id explicitly to disambiguate", primaryProjectsDir)
+}
+
+// findSessionByLastUserPrompt scans every Claude Code project transcript and
+// returns the path of the .jsonl whose most recent "user" entry contains the
+// given substring. Used as a fallback when env vars aren't propagated:
+// concurrent sessions are disambiguated because only the session that just
+// invoked /annotate has it as its most recent user prompt.
+func findSessionByLastUserPrompt(home, needle string) (string, bool) {
+	root := filepath.Join(home, ".claude", "projects")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return "", false
+	}
+
+	type candidate struct {
+		path    string
+		modTime time.Time
+	}
+	var matches []candidate
+
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dir := filepath.Join(root, e.Name())
+		jsonls, _ := os.ReadDir(dir)
+		for _, j := range jsonls {
+			if j.IsDir() || !strings.HasSuffix(j.Name(), ".jsonl") {
+				continue
+			}
+			info, err := j.Info()
+			if err != nil {
+				continue
+			}
+			path := filepath.Join(dir, j.Name())
+			if lastUserContains(path, needle) {
+				matches = append(matches, candidate{path: path, modTime: info.ModTime()})
+			}
+		}
+	}
+	if len(matches) == 0 {
+		return "", false
+	}
+	sort.Slice(matches, func(i, j int) bool { return matches[i].modTime.After(matches[j].modTime) })
+	return matches[0].path, true
+}
+
+// lastUserContains returns true iff the most recent "user" entry in the JSONL
+// file at path contains the given substring. Reads the file once, walks
+// backwards through lines to find the latest user entry.
+func lastUserContains(path, needle string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	lines := strings.Split(string(data), "\n")
+	type contentPart struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	type messagePayload struct {
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+	}
+	type entry struct {
+		Type    string         `json:"type"`
+		Message messagePayload `json:"message"`
+	}
+
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		var ent entry
+		if err := json.Unmarshal([]byte(line), &ent); err != nil {
+			continue
+		}
+		if ent.Type != "user" {
+			continue
+		}
+		// content can be a string or an array of parts.
+		var asString string
+		if err := json.Unmarshal(ent.Message.Content, &asString); err == nil {
+			return strings.Contains(asString, needle)
+		}
+		var parts []contentPart
+		if err := json.Unmarshal(ent.Message.Content, &parts); err == nil {
+			for _, p := range parts {
+				if strings.Contains(p.Text, needle) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return false
 }
 
 func newestJSONL(dir string) (string, bool) {
