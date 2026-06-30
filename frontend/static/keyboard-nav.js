@@ -475,6 +475,7 @@
         if (!nav.cursor) return -1;
 
         const lines = getVisualLines(block);
+        // Primary: identity match — fast and exact when the DOM is stable.
         for (let i = 0; i < lines.length; i++) {
             for (const word of lines[i]) {
                 if (word.textNode === nav.cursor.textNode &&
@@ -482,6 +483,30 @@
                     return i;
                 }
             }
+        }
+        // Fallback: identity miss (e.g. DOM was split by a margin indicator
+        // or a highlight wrapper between presses). Locate by visual Y.
+        // Without this, moveCursorDown sees lineIdx=-1 and treats it as
+        // "before the first line", jumping the cursor back to line 0.
+        try {
+            const range = document.createRange();
+            range.setStart(nav.cursor.textNode, nav.cursor.wordStart);
+            range.setEnd(nav.cursor.textNode, nav.cursor.wordEnd);
+            const cursorY = range.getBoundingClientRect().top;
+            const tolerance = 3;
+            for (let i = 0; i < lines.length; i++) {
+                if (lines[i].length === 0) continue;
+                const first = lines[i][0];
+                const lineRange = document.createRange();
+                lineRange.setStart(first.textNode, first.wordStart);
+                lineRange.setEnd(first.textNode, first.wordEnd);
+                const lineY = lineRange.getBoundingClientRect().top;
+                if (Math.abs(lineY - cursorY) <= tolerance) {
+                    return i;
+                }
+            }
+        } catch (e) {
+            // cursor.textNode may have been detached — fall through to -1
         }
         return -1;
     }
