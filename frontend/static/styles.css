@@ -1179,3 +1179,128 @@ body[data-scratch-mode="true"] #scratch-send-btn {
     color: #57606a;
     font-size: 11px;
 }
+
+/* Keyboard help overlay */
+#keyboard-help-btn {
+    position: fixed;
+    right: 16px;
+    bottom: 16px;
+    width: 36px;
+    height: 36px;
+    border-radius: 18px;
+    border: 1px solid #d0d7de;
+    background: #fff;
+    color: #57606a;
+    font-size: 18px;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
+    z-index: 9997;
+}
+#keyboard-help-btn:hover {
+    color: #0969da;
+    border-color: #0969da;
+}
+#keyboard-help-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.3);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 10001;
+}
+.keyboard-help-panel {
+    background: #fff;
+    border-radius: 8px;
+    width: min(680px, 92vw);
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+}
+.keyboard-help-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    border-bottom: 1px solid #eaecef;
+}
+.keyboard-help-header h2 {
+    margin: 0;
+    font-size: 16px;
+}
+.keyboard-help-close {
+    background: none;
+    border: none;
+    font-size: 22px;
+    line-height: 1;
+    cursor: pointer;
+    color: #57606a;
+    padding: 0 8px;
+}
+.keyboard-help-close:hover { color: #cf222e; }
+.keyboard-help-body {
+    overflow-y: auto;
+    padding: 12px 16px;
+    column-count: 2;
+    column-gap: 24px;
+}
+.keyboard-help-section {
+    break-inside: avoid;
+    margin-bottom: 16px;
+}
+.keyboard-help-section h3 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #57606a;
+    margin: 0 0 8px;
+    font-weight: 600;
+}
+.keyboard-help-section dl {
+    margin: 0;
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    column-gap: 12px;
+    row-gap: 6px;
+    font-size: 13px;
+}
+.keyboard-help-section dt {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+    white-space: nowrap;
+}
+.keyboard-help-section dt kbd,
+.keyboard-help-footer kbd {
+    display: inline-block;
+    padding: 1px 6px;
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace;
+    font-size: 12px;
+    color: #24292f;
+    background: #f6f8fa;
+    border: 1px solid #d0d7de;
+    border-bottom-width: 2px;
+    border-radius: 4px;
+    min-width: 16px;
+    text-align: center;
+}
+.keyboard-help-section .kbd-sep {
+    color: #57606a;
+    font-size: 11px;
+}
+.keyboard-help-section dd {
+    margin: 0;
+    color: #24292f;
+}
+.keyboard-help-footer {
+    border-top: 1px solid #eaecef;
+    padding: 8px 16px;
+    color: #57606a;
+    font-size: 12px;
+}
+@media (max-width: 600px) {
+    .keyboard-help-body { column-count: 1; }
+}
