@@ -456,10 +456,12 @@ func resolveTranscriptPath(projectDir, sessionID string) (string, error) {
 }
 
 // findSessionByLastUserPrompt scans every Claude Code project transcript and
-// returns the path of the .jsonl whose most recent "user" entry contains the
-// given substring. Used as a fallback when env vars aren't propagated:
-// concurrent sessions are disambiguated because only the session that just
-// invoked /annotate has it as its most recent user prompt.
+// returns the path of the .jsonl whose most recent user invocation of the
+// given substring is newest in time. Disambiguates concurrent sessions: only
+// the session that just invoked /annotate has it as its most recently typed
+// user prompt — the rank uses the match's own timestamp, not file mtime, so
+// summary sidechains whose static content happens to mention /annotate but
+// haven't been actively running don't win.
 func findSessionByLastUserPrompt(home, needle string) (string, bool) {
 	root := filepath.Join(home, ".claude", "projects")
 	entries, err := os.ReadDir(root)
@@ -469,7 +471,7 @@ func findSessionByLastUserPrompt(home, needle string) (string, bool) {
 
 	type candidate struct {
 		path    string
-		modTime time.Time
+		matchTS time.Time
 	}
 	var matches []candidate
 
@@ -483,31 +485,32 @@ func findSessionByLastUserPrompt(home, needle string) (string, bool) {
 			if j.IsDir() || !strings.HasSuffix(j.Name(), ".jsonl") {
 				continue
 			}
-			info, err := j.Info()
-			if err != nil {
-				continue
-			}
 			path := filepath.Join(dir, j.Name())
-			if lastUserContains(path, needle) {
-				matches = append(matches, candidate{path: path, modTime: info.ModTime()})
+			if ts, ok := recentUserMatch(path, needle); ok {
+				matches = append(matches, candidate{path: path, matchTS: ts})
 			}
 		}
 	}
 	if len(matches) == 0 {
 		return "", false
 	}
-	sort.Slice(matches, func(i, j int) bool { return matches[i].modTime.After(matches[j].modTime) })
+	sort.Slice(matches, func(i, j int) bool { return matches[i].matchTS.After(matches[j].matchTS) })
 	return matches[0].path, true
 }
 
-// lastUserContains returns true iff the most recent *actual user prompt* in
-// the JSONL file at path contains the given substring. Tool results live in
-// the JSONL as type="user" entries too — those are skipped so we anchor on
-// the last thing the human actually typed.
-func lastUserContains(path, needle string) bool {
+// recentUserMatch returns the timestamp (or empty/zero time) of the most
+// recent type="user" entry whose text content contains the given needle.
+// Walks the full file from the end backwards. Skips entries whose content is
+// purely tool_result / task-notification / etc. — only considers actual
+// human-or-slash-command text prompts.
+//
+// Returns (timestamp, true) on hit so the caller can rank candidate sessions
+// by how recently the user actually invoked the slash command. Returns
+// (zero, false) if no match.
+func recentUserMatch(path, needle string) (time.Time, bool) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return false
+		return time.Time{}, false
 	}
 	lines := strings.Split(string(data), "\n")
 	type contentPart struct {
@@ -519,8 +522,9 @@ func lastUserContains(path, needle string) bool {
 		Content json.RawMessage `json:"content"`
 	}
 	type entry struct {
-		Type    string         `json:"type"`
-		Message messagePayload `json:"message"`
+		Type      string         `json:"type"`
+		Message   messagePayload `json:"message"`
+		Timestamp string         `json:"timestamp"`
 	}
 
 	for i := len(lines) - 1; i >= 0; i-- {
@@ -535,32 +539,33 @@ func lastUserContains(path, needle string) bool {
 		if ent.Type != "user" {
 			continue
 		}
-		// content can be a plain string (real user prompt) or an array of
-		// {type:"text"|"tool_result", ...} parts. We're hunting for the last
-		// real human-typed prompt — skip past tool-result entries.
+		matched := false
 		var asString string
 		if err := json.Unmarshal(ent.Message.Content, &asString); err == nil {
-			return strings.Contains(asString, needle)
-		}
-		var parts []contentPart
-		if err := json.Unmarshal(ent.Message.Content, &parts); err != nil {
-			continue
-		}
-		isToolResultOnly := true
-		for _, p := range parts {
-			if p.Type == "text" && p.Text != "" {
-				isToolResultOnly = false
-				if strings.Contains(p.Text, needle) {
-					return true
+			// Skip task-notification / other system-injected user entries
+			// that aren't actual /annotate invocations.
+			if strings.Contains(asString, needle) {
+				matched = true
+			}
+		} else {
+			var parts []contentPart
+			if err := json.Unmarshal(ent.Message.Content, &parts); err != nil {
+				continue
+			}
+			for _, p := range parts {
+				if p.Type == "text" && strings.Contains(p.Text, needle) {
+					matched = true
+					break
 				}
 			}
 		}
-		if isToolResultOnly {
-			continue // keep walking back through prior entries
+		if !matched {
+			continue // keep walking back; recent unrelated user turns can interleave
 		}
-		return false
+		t, _ := time.Parse(time.RFC3339Nano, ent.Timestamp)
+		return t, true
 	}
-	return false
+	return time.Time{}, false
 }
 
 func newestJSONL(dir string) (string, bool) {
