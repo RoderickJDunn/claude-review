@@ -385,39 +385,65 @@ func openBrowser(url string) error {
 }
 
 // resolveTranscriptPath finds the JSONL transcript for a Claude Code session.
-// Project directories are stored under ~/.claude/projects/<sanitized> where
-// "/" in the cwd is replaced with "-". If sessionID is empty, the most
-// recently modified *.jsonl in that directory is used.
+// Resolution order:
+//  1. If sessionID is given: ~/.claude/projects/<project-hash>/<sessionID>.jsonl,
+//     using $CLAUDE_PROJECT_DIR (if set) for the project hash, else projectDir.
+//  2. Else: the newest .jsonl in the project-hash dir derived from
+//     $CLAUDE_PROJECT_DIR (if set) or projectDir.
+//  3. Else fallback: the newest .jsonl across ALL project-hash dirs under
+//     ~/.claude/projects. Necessary because the slash-command shell can run
+//     with a different cwd from the session's actual start dir (which is
+//     where Claude Code writes the transcript).
 func resolveTranscriptPath(projectDir, sessionID string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	// Claude Code's project hash sanitizes the absolute path by replacing
-	// BOTH "/" and "." with "-". So "/Users/roderick.dunn/Work/claude-review"
-	// becomes "-Users-roderick-dunn-Work-claude-review" (leading "-" from the
-	// leading slash). Any other character that becomes "-" upstream would
-	// need to be added here.
-	sanitized := strings.ReplaceAll(projectDir, "/", "-")
-	sanitized = strings.ReplaceAll(sanitized, ".", "-")
-	if !strings.HasPrefix(sanitized, "-") {
-		sanitized = "-" + sanitized
+
+	hashFor := func(dir string) string {
+		sanitized := strings.ReplaceAll(dir, "/", "-")
+		sanitized = strings.ReplaceAll(sanitized, ".", "-")
+		if !strings.HasPrefix(sanitized, "-") {
+			sanitized = "-" + sanitized
+		}
+		return sanitized
 	}
-	projectsDir := filepath.Join(home, ".claude", "projects", sanitized)
+
+	// Prefer the Claude-Code-provided project dir if available.
+	primaryDir := projectDir
+	if env := os.Getenv("CLAUDE_PROJECT_DIR"); env != "" {
+		primaryDir = env
+	}
+
+	primaryProjectsDir := filepath.Join(home, ".claude", "projects", hashFor(primaryDir))
 
 	if sessionID != "" {
-		path := filepath.Join(projectsDir, sessionID+".jsonl")
-		if _, err := os.Stat(path); err != nil {
-			return "", fmt.Errorf("session transcript not found: %s", path)
+		path := filepath.Join(primaryProjectsDir, sessionID+".jsonl")
+		if _, err := os.Stat(path); err == nil {
+			return path, nil
 		}
+		// Sweep all project-hash dirs as a fallback when the cwd-derived
+		// hash misses (different start dir, env-var mismatch, etc).
+		if path, ok := findSessionAcrossProjects(home, sessionID); ok {
+			return path, nil
+		}
+		return "", fmt.Errorf("session transcript %s.jsonl not found under %s or any other project dir", sessionID, primaryProjectsDir)
+	}
+
+	if path, ok := newestJSONL(primaryProjectsDir); ok {
 		return path, nil
 	}
-
-	entries, err := os.ReadDir(projectsDir)
-	if err != nil {
-		return "", fmt.Errorf("read projects dir %s: %w", projectsDir, err)
+	if path, ok := newestJSONLAcrossProjects(home); ok {
+		return path, nil
 	}
+	return "", fmt.Errorf("no .jsonl transcripts under %s or anywhere in ~/.claude/projects", primaryProjectsDir)
+}
 
+func newestJSONL(dir string) (string, bool) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", false
+	}
 	type entryInfo struct {
 		path    string
 		modTime time.Time
@@ -432,15 +458,62 @@ func resolveTranscriptPath(projectDir, sessionID string) (string, error) {
 			continue
 		}
 		jsonls = append(jsonls, entryInfo{
-			path:    filepath.Join(projectsDir, e.Name()),
+			path:    filepath.Join(dir, e.Name()),
 			modTime: info.ModTime(),
 		})
 	}
 	if len(jsonls) == 0 {
-		return "", fmt.Errorf("no .jsonl transcripts under %s", projectsDir)
+		return "", false
 	}
 	sort.Slice(jsonls, func(i, j int) bool { return jsonls[i].modTime.After(jsonls[j].modTime) })
-	return jsonls[0].path, nil
+	return jsonls[0].path, true
+}
+
+func newestJSONLAcrossProjects(home string) (string, bool) {
+	root := filepath.Join(home, ".claude", "projects")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return "", false
+	}
+	var bestPath string
+	var bestMod time.Time
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if path, ok := newestJSONL(filepath.Join(root, e.Name())); ok {
+			info, err := os.Stat(path)
+			if err != nil {
+				continue
+			}
+			if info.ModTime().After(bestMod) {
+				bestMod = info.ModTime()
+				bestPath = path
+			}
+		}
+	}
+	if bestPath == "" {
+		return "", false
+	}
+	return bestPath, true
+}
+
+func findSessionAcrossProjects(home, sessionID string) (string, bool) {
+	root := filepath.Join(home, ".claude", "projects")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return "", false
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		candidate := filepath.Join(root, e.Name(), sessionID+".jsonl")
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, true
+		}
+	}
+	return "", false
 }
 
 // extractLastAssistantMessage reads a Claude Code JSONL transcript and returns
