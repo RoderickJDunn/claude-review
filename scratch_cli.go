@@ -393,9 +393,13 @@ func resolveTranscriptPath(projectDir, sessionID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// Claude Code's project hash collapses path separators to "-". An absolute
-	// path "/Users/x/Work/y" becomes "-Users-x-Work-y" (note the leading "-").
+	// Claude Code's project hash sanitizes the absolute path by replacing
+	// BOTH "/" and "." with "-". So "/Users/roderick.dunn/Work/claude-review"
+	// becomes "-Users-roderick-dunn-Work-claude-review" (leading "-" from the
+	// leading slash). Any other character that becomes "-" upstream would
+	// need to be added here.
 	sanitized := strings.ReplaceAll(projectDir, "/", "-")
+	sanitized = strings.ReplaceAll(sanitized, ".", "-")
 	if !strings.HasPrefix(sanitized, "-") {
 		sanitized = "-" + sanitized
 	}
