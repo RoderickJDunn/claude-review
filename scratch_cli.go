@@ -385,15 +385,18 @@ func openBrowser(url string) error {
 }
 
 // resolveTranscriptPath finds the JSONL transcript for a Claude Code session.
-// Resolution order:
-//  1. If sessionID is given: ~/.claude/projects/<project-hash>/<sessionID>.jsonl,
-//     using $CLAUDE_PROJECT_DIR (if set) for the project hash, else projectDir.
-//  2. Else: the newest .jsonl in the project-hash dir derived from
-//     $CLAUDE_PROJECT_DIR (if set) or projectDir.
-//  3. Else fallback: the newest .jsonl across ALL project-hash dirs under
-//     ~/.claude/projects. Necessary because the slash-command shell can run
-//     with a different cwd from the session's actual start dir (which is
-//     where Claude Code writes the transcript).
+//
+// We MUST avoid cross-contaminating concurrent sessions, so resolution prefers
+// explicit identifiers over heuristics:
+//
+//  1. If $CLAUDE_SESSION_ID is set, look for that session ID's .jsonl under
+//     the project-hash dir derived from $CLAUDE_PROJECT_DIR (or projectDir
+//     or cwd). If it's not there, search every project-hash dir for that
+//     session ID — session IDs are globally unique, so this is safe.
+//  2. Else if sessionID was passed explicitly, do the same.
+//  3. Else, fall back to the newest .jsonl in the cwd-derived project-hash
+//     dir. Crucially, do NOT scan other project dirs in this case — the
+//     newest .jsonl globally is often a different concurrent session.
 func resolveTranscriptPath(projectDir, sessionID string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -409,7 +412,11 @@ func resolveTranscriptPath(projectDir, sessionID string) (string, error) {
 		return sanitized
 	}
 
-	// Prefer the Claude-Code-provided project dir if available.
+	// Prefer Claude Code's env vars when available — these are the only
+	// reliable way to identify THIS session under concurrent-session use.
+	if envSession := os.Getenv("CLAUDE_SESSION_ID"); envSession != "" && sessionID == "" {
+		sessionID = envSession
+	}
 	primaryDir := projectDir
 	if env := os.Getenv("CLAUDE_PROJECT_DIR"); env != "" {
 		primaryDir = env
@@ -422,8 +429,8 @@ func resolveTranscriptPath(projectDir, sessionID string) (string, error) {
 		if _, err := os.Stat(path); err == nil {
 			return path, nil
 		}
-		// Sweep all project-hash dirs as a fallback when the cwd-derived
-		// hash misses (different start dir, env-var mismatch, etc).
+		// Session IDs are globally unique, so searching every project-hash
+		// dir for the exact ID can't cross-contaminate.
 		if path, ok := findSessionAcrossProjects(home, sessionID); ok {
 			return path, nil
 		}
@@ -433,10 +440,9 @@ func resolveTranscriptPath(projectDir, sessionID string) (string, error) {
 	if path, ok := newestJSONL(primaryProjectsDir); ok {
 		return path, nil
 	}
-	if path, ok := newestJSONLAcrossProjects(home); ok {
-		return path, nil
-	}
-	return "", fmt.Errorf("no .jsonl transcripts under %s or anywhere in ~/.claude/projects", primaryProjectsDir)
+	return "", fmt.Errorf("no .jsonl transcripts under %s. "+
+		"If you are running multiple Claude Code sessions, set $CLAUDE_SESSION_ID "+
+		"or pass --session-id explicitly to disambiguate", primaryProjectsDir)
 }
 
 func newestJSONL(dir string) (string, bool) {
@@ -467,35 +473,6 @@ func newestJSONL(dir string) (string, bool) {
 	}
 	sort.Slice(jsonls, func(i, j int) bool { return jsonls[i].modTime.After(jsonls[j].modTime) })
 	return jsonls[0].path, true
-}
-
-func newestJSONLAcrossProjects(home string) (string, bool) {
-	root := filepath.Join(home, ".claude", "projects")
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return "", false
-	}
-	var bestPath string
-	var bestMod time.Time
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		if path, ok := newestJSONL(filepath.Join(root, e.Name())); ok {
-			info, err := os.Stat(path)
-			if err != nil {
-				continue
-			}
-			if info.ModTime().After(bestMod) {
-				bestMod = info.ModTime()
-				bestPath = path
-			}
-		}
-	}
-	if bestPath == "" {
-		return "", false
-	}
-	return bestPath, true
 }
 
 func findSessionAcrossProjects(home, sessionID string) (string, bool) {
