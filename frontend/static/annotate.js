@@ -5,21 +5,22 @@
 (function () {
     'use strict';
 
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', init);
-    } else {
-        init();
-    }
+    // Module-level state — declared FIRST so init() (which may run
+    // synchronously when readyState !== 'loading') never trips over the
+    // temporal dead zone of a `let` that comes later in the IIFE body.
 
     // Staged extra selections (beyond the cursor's current one). Each entry:
     // { text, lineStart, lineEnd, range }.
     const stagedRanges = [];
 
-    // Persistent staged-pill panel — built lazily in init(). Declared here at
-    // the top of the IIFE so init() (which may run synchronously when this
-    // script loads after DOMContentLoaded) doesn't hit a temporal-dead-zone
-    // error referencing it via buildStagedPanel().
+    // Persistent staged-pill panel — built lazily in init().
     let stagedPanel = null;
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
 
     function inScratchMode() {
         return !!(window.crScratch && window.crScratch.id);
