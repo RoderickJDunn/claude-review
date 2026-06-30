@@ -208,6 +208,7 @@
 
             nav.currentBlockIndex = bestBlockIdx;
             const block = nav.blocks[bestBlockIdx];
+            if (!block) return; // empty block index (e.g. content not yet rendered)
             const words = getWordsInBlock(block);
 
             if (words.length === 0) return;

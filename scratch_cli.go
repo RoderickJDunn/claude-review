@@ -500,9 +500,10 @@ func findSessionByLastUserPrompt(home, needle string) (string, bool) {
 	return matches[0].path, true
 }
 
-// lastUserContains returns true iff the most recent "user" entry in the JSONL
-// file at path contains the given substring. Reads the file once, walks
-// backwards through lines to find the latest user entry.
+// lastUserContains returns true iff the most recent *actual user prompt* in
+// the JSONL file at path contains the given substring. Tool results live in
+// the JSONL as type="user" entries too — those are skipped so we anchor on
+// the last thing the human actually typed.
 func lastUserContains(path, needle string) bool {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -534,18 +535,28 @@ func lastUserContains(path, needle string) bool {
 		if ent.Type != "user" {
 			continue
 		}
-		// content can be a string or an array of parts.
+		// content can be a plain string (real user prompt) or an array of
+		// {type:"text"|"tool_result", ...} parts. We're hunting for the last
+		// real human-typed prompt — skip past tool-result entries.
 		var asString string
 		if err := json.Unmarshal(ent.Message.Content, &asString); err == nil {
 			return strings.Contains(asString, needle)
 		}
 		var parts []contentPart
-		if err := json.Unmarshal(ent.Message.Content, &parts); err == nil {
-			for _, p := range parts {
+		if err := json.Unmarshal(ent.Message.Content, &parts); err != nil {
+			continue
+		}
+		isToolResultOnly := true
+		for _, p := range parts {
+			if p.Type == "text" && p.Text != "" {
+				isToolResultOnly = false
 				if strings.Contains(p.Text, needle) {
 					return true
 				}
 			}
+		}
+		if isToolResultOnly {
+			continue // keep walking back through prior entries
 		}
 		return false
 	}
