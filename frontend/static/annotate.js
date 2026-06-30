@@ -59,7 +59,10 @@
             const popup = document.getElementById('comment-popup');
             if (popup && popup.style.display === 'block') return; // let popup handle it
             e.preventDefault();
-            commitAndClose();
+            e.stopPropagation();
+            // Defer one tick so any pending click handler on the focused
+            // element doesn't race with our commit POST.
+            setTimeout(commitAndClose, 0);
             return;
         }
 
