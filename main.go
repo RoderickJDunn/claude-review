@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -26,6 +27,10 @@ func main() {
 		fmt.Println("  address                  Show unresolved comments for a file")
 		fmt.Println("  reply                    Reply to a comment thread")
 		fmt.Println("  resolve                  Mark comments as resolved")
+		fmt.Println("  clear                    Delete all comments for a file")
+		fmt.Println("  scratch                  Open a scratch annotation buffer in the browser")
+		fmt.Println("  annotate-clipboard       Annotate clipboard contents and write result back")
+		fmt.Println("  annotate-session         Annotate the most recent assistant message from a Claude Code session")
 		fmt.Println("  install                  Install slash commands")
 		fmt.Println("  uninstall                Uninstall slash commands")
 		fmt.Println("  version                  Show version information")
@@ -47,6 +52,14 @@ func main() {
 		runReply()
 	case "resolve":
 		runResolve()
+	case "clear":
+		runClear()
+	case "scratch":
+		runScratch()
+	case "annotate-clipboard":
+		runAnnotateClipboard()
+	case "annotate-session":
+		runAnnotateSession()
 	case "install":
 		runInstall()
 	case "uninstall":
@@ -132,6 +145,7 @@ func runServer() {
 	// HTML Routes
 	r.Get("/", handleHome)
 	r.Get("/projects/*", handleProjectFiles)
+	r.Get("/scratch/{id}", handleScratchViewer)
 
 	// API Routes
 	r.Post("/api/comments", handleCreateComment)
@@ -140,6 +154,17 @@ func runServer() {
 	r.Delete("/api/comments/{id}", handleDeleteComment)
 	r.Get("/api/events", handleSSE)
 	r.Post("/api/events", handleBroadcast)
+	r.Get("/api/content", handleGetContent)
+	r.Put("/api/content", handleSaveContent)
+
+	// Scratch endpoints (ephemeral annotation sessions)
+	r.Post("/api/scratch", handleCreateScratch)
+	r.Post("/api/scratch/{id}/commit", handleCommitScratch)
+	r.Get("/api/scratch/{id}/await", handleAwaitScratch)
+	r.Delete("/api/scratch/{id}", handleDeleteScratch)
+
+	// Start scratch garbage collector
+	startScratchGC()
 
 	// Static files from embedded FS
 	staticSubFS, err := fs.Sub(staticFS, "frontend/static")
@@ -157,7 +182,7 @@ func runServer() {
 		fmt.Printf("Starting server on http://localhost:%s\n", port)
 	}
 	log.Printf("Server listening on port %s", port)
-	if err := http.ListenAndServe("127.0.0.1:"+port, r); err != nil {
+	if err := http.ListenAndServe(":"+port, r); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}
 }
@@ -213,6 +238,8 @@ func runReview() {
 		*projectDir = cwd
 	}
 
+	rejoinSplitPath(reviewCmd, filePath)
+
 	if *filePath == "" {
 		fmt.Println("Error: --file flag is required")
 		os.Exit(1)
@@ -231,6 +258,11 @@ func runReview() {
 	// Step 2: Initialize database and register project
 	if err := initDB(); err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
+	}
+
+	// Resolve absolute file path against registered projects
+	if filepath.IsAbs(*filePath) {
+		*projectDir, *filePath = resolveFileToProject(*filePath, *projectDir)
 	}
 
 	_, err := createProject(*projectDir)
@@ -271,6 +303,9 @@ func runAddress() {
 		}
 		*projectDir = cwd
 	}
+
+	rejoinSplitPath(reviewCmd, filePath)
+
 	if *filePath == "" {
 		fmt.Println("Error: --file flag is required")
 		os.Exit(1)
@@ -282,6 +317,11 @@ func runAddress() {
 	// Initialize database
 	if err := initDB(); err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
+	}
+
+	// Resolve absolute file path against registered projects
+	if filepath.IsAbs(*filePath) {
+		*projectDir, *filePath = resolveFileToProject(*filePath, *projectDir)
 	}
 
 	// Debug: show what we're searching for
@@ -496,6 +536,9 @@ func runResolve() {
 		}
 		*projectDir = cwd
 	}
+
+	rejoinSplitPath(resolveCmd, filePath)
+
 	if *filePath == "" {
 		fmt.Println("Error: --file flag is required (or use --comment-id)")
 		os.Exit(1)
@@ -503,6 +546,11 @@ func runResolve() {
 
 	// Remove @ prefix if present
 	*filePath = strings.TrimPrefix(*filePath, "@")
+
+	// Resolve absolute file path against registered projects
+	if filepath.IsAbs(*filePath) {
+		*projectDir, *filePath = resolveFileToProject(*filePath, *projectDir)
+	}
 
 	// Debug: show what we're searching for
 	log.Printf("Searching for comments: project_directory=%q, file_path=%q", *projectDir, *filePath)
@@ -530,6 +578,53 @@ func runResolve() {
 	}
 }
 
+func runClear() {
+	clearCmd := flag.NewFlagSet("clear", flag.ExitOnError)
+	projectDir := clearCmd.String("project", "", "Project directory (defaults to current directory)")
+	filePath := clearCmd.String("file", "", "File path relative to project directory")
+
+	if err := clearCmd.Parse(os.Args[2:]); err != nil {
+		log.Fatalf("Failed to parse flags: %v", err)
+	}
+
+	if *projectDir == "" || *projectDir == "." {
+		cwd, err := os.Getwd()
+		if err != nil {
+			log.Fatalf("Failed to get current directory: %v", err)
+		}
+		*projectDir = cwd
+	}
+
+	rejoinSplitPath(clearCmd, filePath)
+
+	if *filePath == "" {
+		fmt.Println("Error: --file flag is required")
+		os.Exit(1)
+	}
+
+	*filePath = strings.TrimPrefix(*filePath, "@")
+
+	if err := initDB(); err != nil {
+		log.Fatalf("Failed to initialize database: %v", err)
+	}
+
+	if filepath.IsAbs(*filePath) {
+		*projectDir, *filePath = resolveFileToProject(*filePath, *projectDir)
+	}
+
+	count, err := deleteAllComments(*projectDir, *filePath)
+	if err != nil {
+		log.Fatalf("Failed to clear comments: %v", err)
+	}
+
+	if count == 0 {
+		fmt.Printf("No comments found for %s\n", *filePath)
+	} else {
+		fmt.Printf("Deleted %d comment(s) for %s\n", count, *filePath)
+		notifyServerCommentsChanged(*projectDir, *filePath)
+	}
+}
+
 func runInstall() {
 	if err := installSlashCommands(); err != nil {
 		log.Fatalf("Failed to install slash commands: %v", err)
@@ -544,6 +639,56 @@ func runUninstall() {
 
 func runVersion() {
 	fmt.Println(Version)
+}
+
+// resolveFileToProject takes an absolute file path and resolves it against
+// registered projects in the database. It returns the matching project directory
+// and the file path relative to that project. If no registered project contains
+// the file, it falls back to using the provided default project directory and
+// relativizes against that.
+func resolveFileToProject(absFilePath, defaultProjectDir string) (projectDir, relFilePath string) {
+	projects, err := getAllProjects()
+	if err == nil {
+		// Sort by path length descending to match the most specific project first
+		for i := 0; i < len(projects); i++ {
+			for j := i + 1; j < len(projects); j++ {
+				if len(projects[j].Directory) > len(projects[i].Directory) {
+					projects[i], projects[j] = projects[j], projects[i]
+				}
+			}
+		}
+		for _, p := range projects {
+			rel, err := filepath.Rel(p.Directory, absFilePath)
+			if err == nil && !strings.HasPrefix(rel, "..") {
+				return p.Directory, rel
+			}
+		}
+	}
+
+	// Fallback: relativize against the default project directory
+	rel, err := filepath.Rel(defaultProjectDir, absFilePath)
+	if err == nil && !strings.HasPrefix(rel, "..") {
+		return defaultProjectDir, rel
+	}
+	return defaultProjectDir, absFilePath
+}
+
+// rejoinSplitPath fixes file paths that were split by shell word-splitting
+// (e.g. paths with spaces passed through slash commands). If the flag set has
+// leftover positional args and filePath is non-empty, they're joined back.
+func rejoinSplitPath(flagSet *flag.FlagSet, filePath *string) {
+	if remaining := flagSet.Args(); len(remaining) > 0 {
+		if *filePath != "" {
+			parts := append([]string{*filePath}, remaining...)
+			*filePath = strings.Join(parts, " ")
+		} else {
+			// filePath empty but positional args exist — likely double-quoted
+			// shell interpolation where "" produced an empty --file value
+			*filePath = strings.Join(remaining, " ")
+		}
+	}
+	// Strip surrounding quotes that may have leaked from slash command interpolation
+	*filePath = strings.Trim(*filePath, "\"'")
 }
 
 func capitalizeFirst(s string) string {

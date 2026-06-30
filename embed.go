@@ -7,7 +7,7 @@ import (
 //go:embed frontend/templates/*.html
 var templatesFS embed.FS
 
-//go:embed frontend/static/*.css frontend/static/*.js
+//go:embed frontend/static/*.css frontend/static/*.js frontend/static/vendor/*.js
 var staticFS embed.FS
 
 //go:embed slash-commands/*.md

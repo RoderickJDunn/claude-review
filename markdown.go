@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/yuin/goldmark"
 	highlighting "github.com/yuin/goldmark-highlighting/v2"
@@ -208,6 +210,204 @@ func RenderMarkdownWithLineNumbers(source []byte) ([]byte, error) {
 	html := addLineAttributesToCodeBlocks(buf.Bytes(), transformer.codeBlocks)
 
 	return html, nil
+}
+
+// Truncation thresholds for quoted ranges in chat output (per the inline
+// annotation spec: render first 2 lines, "> …", last 2 lines, when a range
+// exceeds either limit).
+const (
+	chatQuoteMaxLines = 6
+	chatQuoteMaxChars = 400
+	chatHeadTailLines = 2
+)
+
+// chatThread is one render-ready annotation block: zero-or-more quoted ranges
+// (the root selection plus any multi-select extras) followed by the user's
+// verb + comment.
+type chatThread struct {
+	ranges    []chatRange
+	verb      string // "agree" | "reject" | "question" | "comment" | ""
+	body      string // free-form text (optional reason for agree/reject; required for ?/c)
+	firstLine int    // smallest line across ranges, for document-order sort
+}
+
+type chatRange struct {
+	lineStart    int
+	lineEnd      int
+	selectedText string
+}
+
+// RenderThreadsToChat takes the original scratch markdown plus the threads
+// the user attached to it, and returns a single compact reply suitable for
+// pasting back to an agent. Threads are emitted in document order; untouched
+// parts of the source are NOT included (the agent already has them).
+//
+// The `source` parameter is currently unused but accepted to keep the API
+// stable as future renderers may need it (e.g. to reflow selections by line
+// number when SelectedText is empty).
+func RenderThreadsToChat(_ string, threads [][]Comment) string {
+	chatThreads := make([]chatThread, 0, len(threads))
+	for _, t := range threads {
+		ct, ok := buildChatThread(t)
+		if ok {
+			chatThreads = append(chatThreads, ct)
+		}
+	}
+
+	// Stable sort by first line across all attached ranges.
+	for i := 0; i < len(chatThreads); i++ {
+		for j := i + 1; j < len(chatThreads); j++ {
+			if chatThreads[j].firstLine < chatThreads[i].firstLine {
+				chatThreads[i], chatThreads[j] = chatThreads[j], chatThreads[i]
+			}
+		}
+	}
+
+	blocks := make([]string, 0, len(chatThreads))
+	for _, ct := range chatThreads {
+		blocks = append(blocks, renderChatThread(ct))
+	}
+	return strings.Join(blocks, "\n\n")
+}
+
+func buildChatThread(thread []Comment) (chatThread, bool) {
+	if len(thread) == 0 {
+		return chatThread{}, false
+	}
+	root := thread[0]
+
+	ranges := []chatRange{}
+	if root.SelectedText != "" {
+		ranges = append(ranges, chatRange{
+			lineStart:    intOrZero(root.LineStart),
+			lineEnd:      intOrZero(root.LineEnd),
+			selectedText: root.SelectedText,
+		})
+	}
+	if root.ExtraRanges != "" {
+		var extras []ExtraRange
+		if err := json.Unmarshal([]byte(root.ExtraRanges), &extras); err == nil {
+			for _, e := range extras {
+				ranges = append(ranges, chatRange{
+					lineStart:    e.LineStart,
+					lineEnd:      e.LineEnd,
+					selectedText: e.SelectedText,
+				})
+			}
+		}
+	}
+
+	// Sort ranges within a thread by line number so multi-select reads top-to-bottom.
+	for i := 0; i < len(ranges); i++ {
+		for j := i + 1; j < len(ranges); j++ {
+			if ranges[j].lineStart < ranges[i].lineStart {
+				ranges[i], ranges[j] = ranges[j], ranges[i]
+			}
+		}
+	}
+
+	firstLine := 1 << 30
+	for _, r := range ranges {
+		if r.lineStart > 0 && r.lineStart < firstLine {
+			firstLine = r.lineStart
+		}
+	}
+	if firstLine == 1<<30 {
+		firstLine = 0
+	}
+
+	return chatThread{
+		ranges:    ranges,
+		verb:      root.Verb,
+		body:      strings.TrimSpace(root.CommentText),
+		firstLine: firstLine,
+	}, true
+}
+
+func renderChatThread(ct chatThread) string {
+	var b strings.Builder
+	for i, r := range ct.ranges {
+		if i > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(renderQuotedRange(r.selectedText))
+	}
+	if len(ct.ranges) > 0 {
+		b.WriteString("\n\n")
+	}
+	b.WriteString(renderVerbResponse(ct.verb, ct.body))
+	return b.String()
+}
+
+// renderQuotedRange emits a `> ` quoted block, applying central-ellipsis
+// truncation when the selection exceeds chatQuoteMaxLines OR chatQuoteMaxChars.
+func renderQuotedRange(text string) string {
+	text = strings.TrimRight(text, "\n")
+	lines := strings.Split(text, "\n")
+
+	truncate := len(lines) > chatQuoteMaxLines || len(text) > chatQuoteMaxChars
+	if !truncate {
+		return prefixQuote(lines)
+	}
+
+	head := lines[:chatHeadTailLines]
+	tail := lines[len(lines)-chatHeadTailLines:]
+	// Guard against overlap on borderline inputs.
+	if len(lines) < 2*chatHeadTailLines {
+		return prefixQuote(lines)
+	}
+
+	combined := append([]string{}, head...)
+	combined = append(combined, "…")
+	combined = append(combined, tail...)
+	return prefixQuote(combined)
+}
+
+func prefixQuote(lines []string) string {
+	out := make([]string, 0, len(lines))
+	for _, l := range lines {
+		if l == "" {
+			out = append(out, ">")
+		} else {
+			out = append(out, "> "+l)
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+func renderVerbResponse(verb, body string) string {
+	body = strings.TrimSpace(body)
+	switch verb {
+	case "agree":
+		if body != "" {
+			return "Agreed. " + body
+		}
+		return "Agreed."
+	case "reject":
+		if body != "" {
+			return "Skip. " + body
+		}
+		return "Skip."
+	case "question":
+		if body == "" {
+			return "Q:"
+		}
+		return "Q: " + body
+	default:
+		// "comment" or empty verb — emit body verbatim. Body may be empty for
+		// degenerate cases (e.g. a stray empty comment); skip empty output.
+		if body == "" {
+			return ""
+		}
+		return body
+	}
+}
+
+func intOrZero(p *int) int {
+	if p == nil {
+		return 0
+	}
+	return *p
 }
 
 // RenderMarkdown renders markdown to HTML without line number attributes

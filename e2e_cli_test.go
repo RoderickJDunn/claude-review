@@ -1,17 +1,38 @@
 package main_test
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// lockedBuffer is a concurrency-safe buffer for capturing subprocess output
+// while the test goroutine reads it from another thread.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
 
 // TestE2E_CLI_Register tests the register command variants
 func TestE2E_CLI_Register(t *testing.T) {
@@ -200,6 +221,22 @@ func TestE2E_CLI_Review(t *testing.T) {
 		assert.Contains(t, output, "Open this URL")
 		assert.Contains(t, output, fmt.Sprintf("http://localhost:%s/projects", env.Port))
 		assert.Contains(t, output, "test.md")
+	})
+
+	t.Run("review normalizes absolute file path to relative", func(t *testing.T) {
+		absFile := filepath.Join(env.ProjectDir, "test.md")
+		output, err := env.runCLI(t, "review", "--file", absFile, "--project", env.ProjectDir)
+		require.NoError(t, err)
+		assert.Contains(t, output, "Open this URL")
+		// URL should contain the full project directory path only once, not doubled
+		urlStart := strings.Index(output, "http://")
+		urlLine := output[urlStart:]
+		urlEnd := strings.Index(urlLine, "\n")
+		if urlEnd > 0 {
+			urlLine = urlLine[:urlEnd]
+		}
+		projectDirCount := strings.Count(urlLine, env.ProjectDir)
+		assert.Equal(t, 1, projectDirCount, "Project directory should appear exactly once in URL, got: %s", urlLine)
 	})
 
 	t.Run("review strips @ prefix from file path", func(t *testing.T) {
@@ -632,4 +669,107 @@ func TestE2E_CLI_Uninstall(t *testing.T) {
 		require.NoError(t, err)
 		assert.Contains(t, string(content), "claude-review")
 	})
+}
+
+// TestE2E_CLI_Scratch tests the scratch-buffer CLI round-trip: post content,
+// post a verb annotation via the daemon's REST API, commit, and verify the
+// CLI returns rendered output to its stdout sink.
+func TestE2E_CLI_Scratch(t *testing.T) {
+	env := setupE2E(t)
+
+	// Write the scratch content to a file (avoids needing a tty for stdin).
+	scratchFile := filepath.Join(env.TempDir, "scratch.md")
+	scratchContent := "# Plan\n\n- bullet one\n- bullet two\n- bullet three\n"
+	require.NoError(t, os.WriteFile(scratchFile, []byte(scratchContent), 0644))
+
+	// Start the CLI; --no-open keeps it from launching a browser during tests.
+	cmd := exec.Command(env.BinaryPath, "scratch",
+		"--from-file", scratchFile,
+		"--label", "test-scratch",
+		"--no-open",
+		"--stdout",
+	)
+	cmd.Env = append(os.Environ(),
+		"CR_DATA_DIR="+env.DataDir,
+		"CR_LISTEN_PORT="+env.Port,
+		"GOCOVERDIR=tmp/coverage",
+	)
+	stdout := &lockedBuffer{}
+	stderr := &lockedBuffer{}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+
+	require.NoError(t, cmd.Start(), "Failed to start scratch CLI")
+
+	// Wait for the URL to appear on stderr so we know the session is registered.
+	scratchID := ""
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		out := stderr.String()
+		if idx := strings.Index(out, "/scratch/"); idx >= 0 {
+			rest := out[idx+len("/scratch/"):]
+			if end := strings.IndexAny(rest, " \n\r\t"); end >= 0 {
+				scratchID = rest[:end]
+			} else {
+				scratchID = strings.TrimSpace(rest)
+			}
+			if scratchID != "" {
+				break
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	require.NotEmpty(t, scratchID, "Did not extract scratch session ID from CLI stderr: %s", stderr.String())
+
+	// Post a quick-reaction "agree" comment with one selected range.
+	comment := map[string]interface{}{
+		"project_directory": "::scratch",
+		"file_path":         scratchID,
+		"line_start":        3,
+		"line_end":          3,
+		"selected_text":     "- bullet one",
+		"comment_text":      "",
+		"verb":              "agree",
+	}
+	resp := env.postJSON(t, "/api/comments", comment)
+	_ = resp.Body.Close()
+	require.Equal(t, 200, resp.StatusCode, "Failed to create comment")
+
+	// Commit the session — this unblocks the CLI.
+	commitResp := env.postJSON(t, "/api/scratch/"+scratchID+"/commit", map[string]string{})
+	_ = commitResp.Body.Close()
+	require.Equal(t, 200, commitResp.StatusCode)
+
+	// CLI should exit shortly after commit.
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		require.NoError(t, err, "CLI exited with error: stdout=%s stderr=%s", stdout.String(), stderr.String())
+	case <-time.After(5 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatalf("CLI did not exit after commit. stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+
+	out := stdout.String()
+	assert.Contains(t, out, "> - bullet one", "Expected quoted selection in rendered output")
+	assert.Contains(t, out, "Agreed.", "Expected verb 'Agreed.' in rendered output")
+}
+
+// TestE2E_CLI_Scratch_RequiresInputSource ensures the CLI validates flag combos.
+func TestE2E_CLI_Scratch_RequiresInputSource(t *testing.T) {
+	env := setupE2E(t)
+	output, err := env.runCLI(t, "scratch", "--stdout")
+	require.Error(t, err)
+	assert.Contains(t, output, "--from-clipboard")
+}
+
+// TestE2E_CLI_Scratch_RequiresOutputSink ensures the CLI validates sink combos.
+func TestE2E_CLI_Scratch_RequiresOutputSink(t *testing.T) {
+	env := setupE2E(t)
+	scratchFile := filepath.Join(env.TempDir, "scratch.md")
+	require.NoError(t, os.WriteFile(scratchFile, []byte("content"), 0644))
+	output, err := env.runCLI(t, "scratch", "--from-file", scratchFile)
+	require.Error(t, err)
+	assert.Contains(t, output, "--stdout")
 }

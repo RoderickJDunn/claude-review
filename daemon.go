@@ -170,6 +170,10 @@ func setupSignalHandlers() {
 		sig := <-sigChan
 		log.Printf("Received signal: %v, shutting down gracefully...", sig)
 
+		// Drop ephemeral scratch sessions before tearing down the DB so
+		// their attached comments don't outlive the daemon.
+		purgeAllScratchSessions()
+
 		// Cleanup PID file
 		if err := removePIDFile(); err != nil {
 			log.Printf("Failed to remove PID file: %v", err)

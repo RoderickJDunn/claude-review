@@ -40,7 +40,7 @@ test-ci:
 	grep -h -v "^mode:" coverage-unit.txt coverage-e2e.txt >> coverage.txt
 
 build:
-	go build -trimpath -ldflags="-s -w -X main.Version=${CR_VERSION}" -o ./${CR_BUILD_ARTIFACTS_DIR}/${CR_EXECUTABLE_FILENAME} .
+	go build -trimpath -ldflags="-s -w -X main.Version=${CR_VERSION} -X main.CommitHash=$$(git rev-parse --short HEAD)" -o ./${CR_BUILD_ARTIFACTS_DIR}/${CR_EXECUTABLE_FILENAME} .
 
 build-release: build
 
@@ -63,4 +63,7 @@ release-major:
 	./release.sh major
 
 install: build
+	mkdir -p $(HOME)/.local/bin
+	cp ./${CR_BUILD_ARTIFACTS_DIR}/${CR_EXECUTABLE_FILENAME} $(HOME)/.local/bin/${CR_EXECUTABLE_FILENAME}
+	codesign --force --sign - $(HOME)/.local/bin/${CR_EXECUTABLE_FILENAME}
 	./${CR_BUILD_ARTIFACTS_DIR}/${CR_EXECUTABLE_FILENAME} install

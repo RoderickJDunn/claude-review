@@ -8,6 +8,86 @@
     let commentPopup = null;
     let commentPanel = null;
 
+    // Initialize shared navigation state
+    window.crNav = {
+        blocks: [],
+        currentBlockIndex: 0,
+        cursor: null,
+        targetX: null,
+        active: false,
+        editMode: false,        // true when editor is active
+        paneFocus: false,       // true when comment pane has focus
+        paneCommentIndex: -1,   // index into root comments in pane
+        selection: {
+            level: 0,
+            range: null,
+            lineStart: null,
+            lineEnd: null,
+            text: '',
+        },
+    };
+
+    function showConfirmDialog(message) {
+        return new Promise((resolve) => {
+            const overlay = document.createElement('div');
+            overlay.id = 'confirm-dialog-overlay';
+
+            const dialog = document.createElement('div');
+            dialog.id = 'confirm-dialog';
+
+            const msg = document.createElement('p');
+            msg.textContent = message;
+            dialog.appendChild(msg);
+
+            const buttons = document.createElement('div');
+            buttons.className = 'confirm-dialog-buttons';
+
+            const cancelBtn = document.createElement('button');
+            cancelBtn.className = 'comment-btn';
+            cancelBtn.textContent = 'Cancel';
+
+            const confirmBtn = document.createElement('button');
+            confirmBtn.className = 'comment-btn comment-btn-primary';
+            confirmBtn.textContent = 'Confirm';
+
+            buttons.appendChild(cancelBtn);
+            buttons.appendChild(confirmBtn);
+            dialog.appendChild(buttons);
+
+            const hint = document.createElement('div');
+            hint.className = 'confirm-dialog-hint';
+            hint.textContent = 'Enter to confirm · Escape to cancel';
+            dialog.appendChild(hint);
+
+            overlay.appendChild(dialog);
+            document.body.appendChild(overlay);
+            confirmBtn.focus();
+
+            function cleanup(result) {
+                document.removeEventListener('keydown', onKey);
+                overlay.remove();
+                resolve(result);
+            }
+
+            function onKey(e) {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    cleanup(true);
+                } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    cleanup(false);
+                }
+            }
+
+            document.addEventListener('keydown', onKey);
+            cancelBtn.addEventListener('click', () => cleanup(false));
+            confirmBtn.addEventListener('click', () => cleanup(true));
+            overlay.addEventListener('click', (e) => {
+                if (e.target === overlay) cleanup(false);
+            });
+        });
+    }
+
     // Initialize when DOM is ready
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', init);
@@ -17,11 +97,98 @@
 
     function init() {
         initTextSelection();
+        initCopyButton();
         createCommentButton();
         createCommentPopup();
         createCommentPanel();
         loadExistingComments();
         setupSSE();
+
+        // Expose functions for keyboard modules
+        window.crViewer = {
+            showCommentPopup,
+            showEditCommentPopup,
+            showReplyPopup,
+            hideCommentPopup,
+            updateCommentPanel,
+            extractLineNumbersFromRange,
+            commentHasReplies,
+            getComments: () => comments,
+            getRootThreadContainers: () => Array.from(document.querySelectorAll('.thread-container')),
+            getCurrentSelection: () => currentSelection,
+            setCurrentSelection: (sel) => { currentSelection = sel; },
+        };
+
+        // Expose confirm dialog globally for editor.js
+        window.showConfirmDialog = showConfirmDialog;
+    }
+
+    function initCopyButton() {
+        const btn = document.getElementById('copy-markdown-btn');
+        if (!btn) return;
+
+        // Pre-fetch markdown so the tap handler can copy synchronously
+        // (iOS Safari requires clipboard ops within the user gesture)
+        let cachedMarkdown = null;
+        const params = new URLSearchParams({
+            project_directory: projectDir,
+            file_path: filePath,
+        });
+        fetch('/api/content?' + params)
+            .then(r => r.ok ? r.text() : Promise.reject('fetch failed'))
+            .then(md => { cachedMarkdown = md; })
+            .catch(err => console.error('Pre-fetch markdown failed:', err));
+
+        btn.addEventListener('click', async () => {
+            try {
+                let markdown = cachedMarkdown;
+                if (!markdown) {
+                    const resp = await fetch('/api/content?' + params);
+                    if (!resp.ok) throw new Error('Failed to fetch');
+                    markdown = await resp.text();
+                    cachedMarkdown = markdown;
+                }
+                await copyToClipboard(markdown);
+
+                btn.classList.add('copied');
+                btn.querySelector('.copy-label').textContent = 'Copied!';
+                setTimeout(() => {
+                    btn.classList.remove('copied');
+                    btn.querySelector('.copy-label').textContent = 'Copy';
+                }, 2000);
+            } catch (err) {
+                console.error('Copy failed:', err);
+            }
+        });
+    }
+
+    // Clipboard API requires HTTPS; fall back to execCommand for HTTP/local.
+    // iOS Safari needs special handling: the element must be in-viewport,
+    // readOnly must be false, and setSelectionRange is required.
+    async function copyToClipboard(text) {
+        if (navigator.clipboard && window.isSecureContext) {
+            return navigator.clipboard.writeText(text);
+        }
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.readOnly = false;
+        textarea.contentEditable = 'true';
+        textarea.style.position = 'fixed';
+        textarea.style.top = '0';
+        textarea.style.left = '0';
+        textarea.style.width = '1px';
+        textarea.style.height = '1px';
+        textarea.style.padding = '0';
+        textarea.style.border = 'none';
+        textarea.style.outline = 'none';
+        textarea.style.background = 'transparent';
+        textarea.style.clip = 'rect(0,0,0,0)';
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.setSelectionRange(0, text.length);
+        const ok = document.execCommand('copy');
+        document.body.removeChild(textarea);
+        if (!ok) throw new Error('execCommand copy failed');
     }
 
     function initTextSelection() {
@@ -36,6 +203,9 @@
     }
 
     function handleTextSelection(event) {
+        // Don't interfere during edit mode
+        if (window.crNav.editMode) return;
+
         const selection = window.getSelection();
         const selectedText = selection.toString().trim();
 
@@ -147,9 +317,11 @@
             return;
         }
 
-        // Restore panel state from localStorage, default to 'expanded'
-        const savedState = localStorage.getItem('claude-review-panel-state') || 'expanded';
-        commentPanel.className = savedState + ' ready';
+        // On mobile (< 768px), default to collapsed unless user explicitly saved a state
+        const isMobile = window.innerWidth < 768;
+        const savedState = localStorage.getItem('claude-review-panel-state');
+        const defaultState = isMobile ? 'collapsed' : 'expanded';
+        commentPanel.className = (savedState || defaultState) + ' ready';
 
         // Click on resize button to cycle through widths
         commentPanel.querySelector('.panel-resize-btn').addEventListener('click', (e) => {
@@ -164,6 +336,23 @@
                 savePanelState('expanded');
             }
         });
+
+        // Minimize button collapses the panel
+        commentPanel.querySelector('.panel-minimize-btn').addEventListener('click', (e) => {
+            e.stopPropagation();
+            commentPanel.classList.remove('expanded', 'expanded-wide');
+            commentPanel.classList.add('collapsed');
+            savePanelState('collapsed');
+        });
+
+        // Click on collapsed panel header to expand
+        commentPanel.querySelector('.comment-panel-header').addEventListener('click', () => {
+            if (commentPanel.classList.contains('collapsed')) {
+                commentPanel.classList.remove('collapsed');
+                commentPanel.classList.add('expanded');
+                savePanelState('expanded');
+            }
+        });
     }
 
     function savePanelState(state) {
@@ -171,6 +360,7 @@
     }
 
     function updateCommentPanel() {
+        addCommentMarginIndicators();
         if (!commentPanel) return;
 
         const listContainer = commentPanel.querySelector('.comment-panel-list');
@@ -263,6 +453,24 @@
                 statusDot.className = 'comment-status-dot';
                 statusDot.title = 'Awaiting your response';
                 badgesDiv.appendChild(statusDot);
+            }
+
+            // Add edit button for root comments without replies
+            if (replyCount === 0) {
+                const editBtn = document.createElement('button');
+                editBtn.className = 'comment-badge-btn comment-badge-edit';
+                editBtn.textContent = 'Edit';
+                editBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const highlight = document.querySelector(`.comment-highlight[data-comment-id="${comment.id}"]`);
+                    if (highlight) {
+                        highlight.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        // Position popup near the panel
+                        const rect = commentPanel.getBoundingClientRect();
+                        showEditCommentPopup(comment, highlight, rect.left - 520, rect.top + 40);
+                    }
+                });
+                badgesDiv.appendChild(editBtn);
             }
 
             // Add reply button as badge
@@ -418,7 +626,7 @@
         `;
         document.body.appendChild(commentPopup);
 
-        // Add keyboard handler for textarea (Enter to submit, Shift+Enter for newline)
+        // Add keyboard handler for textarea (Enter to submit, Shift+Enter for newline, Escape to cancel)
         const textarea = document.getElementById('comment-text');
         textarea.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
@@ -427,6 +635,9 @@
                 if (saveBtn) {
                     saveBtn.click();
                 }
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                hideCommentPopup();
             }
         });
 
@@ -588,7 +799,7 @@
     }
 
     async function handleResolveThread(rootComment) {
-        if (!confirm('Are you sure you want to resolve this thread?')) {
+        if (!(await showConfirmDialog('Resolve this thread?'))) {
             return;
         }
 
@@ -777,7 +988,7 @@
      * Handle deleting a comment
      */
     async function handleDeleteComment(comment, highlightElement) {
-        if (!confirm('Are you sure you want to delete this comment?')) {
+        if (!(await showConfirmDialog('Delete this comment?'))) {
             return;
         }
 
@@ -886,13 +1097,46 @@
             return;
         }
 
-        // Highlight each comment by finding its text in the document
+        // Highlight root comments by finding their text in the document
+        // (replies have no selected_text and don't get their own highlight)
         comments.forEach((comment) => {
-            highlightExistingComment(comment);
+            if (!comment.root_id && comment.selected_text) {
+                highlightExistingComment(comment);
+            }
         });
 
         // Update comment panel after loading all comments
         updateCommentPanel();
+    }
+
+    function addCommentMarginIndicators() {
+        // Remove existing indicators
+        document.querySelectorAll('.comment-margin-indicator').forEach(el => el.remove());
+
+        const highlights = document.querySelectorAll('.comment-highlight');
+        const processedBlocks = new Set();
+
+        highlights.forEach(highlight => {
+            // Find the containing block element (p, li, h1-h6, etc.)
+            const block = highlight.closest('[data-line-start]');
+            if (!block || processedBlocks.has(block)) return;
+            processedBlocks.add(block);
+
+            // Count comments in this block
+            const commentIds = new Set();
+            block.querySelectorAll('.comment-highlight').forEach(h => {
+                commentIds.add(h.dataset.commentId);
+            });
+
+            block.style.position = 'relative';
+            const indicator = document.createElement('div');
+            indicator.className = 'comment-margin-indicator';
+            indicator.title = `${commentIds.size} comment${commentIds.size > 1 ? 's' : ''}`;
+            if (commentIds.size > 1) {
+                indicator.dataset.count = commentIds.size;
+            }
+            block.appendChild(indicator);
+        });
     }
 
     /**
@@ -916,10 +1160,27 @@
             }
         }
 
-        // Try to find the text using window.find() which handles fragmented text nodes
-        for (const block of relevantBlocks) {
-            // First, try simple text node search for performance
-            const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT, null, false);
+        // Search in line-matched blocks first, then fall back to all blocks
+        if (relevantBlocks.length > 0 && searchBlocksForText(relevantBlocks, text, comment)) return;
+
+        // Fallback: line numbers may be stale — search the entire document
+        if (searchBlocksForText(Array.from(blockElements), text, comment)) return;
+
+        console.warn('Could not find text to highlight:', text);
+    }
+
+    function searchBlocksForText(blocks, text, comment) {
+        for (const block of blocks) {
+            // First try: find text in a single text node (not inside existing highlights)
+            const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT, {
+                acceptNode: function (node) {
+                    // Skip text nodes inside existing comment highlights
+                    if (node.parentElement && node.parentElement.closest('.comment-highlight')) {
+                        return NodeFilter.FILTER_REJECT;
+                    }
+                    return NodeFilter.FILTER_ACCEPT;
+                }
+            }, false);
             let node;
             while ((node = walker.nextNode())) {
                 const index = node.textContent.indexOf(text);
@@ -928,68 +1189,78 @@
                     range.setStart(node, index);
                     range.setEnd(node, index + text.length);
                     highlightComment(range, comment);
-                    return;
+                    return true;
                 }
             }
 
-            // If simple search failed, use a more robust approach that handles inline elements
-            // Get all text content from the block, then search for our text
-            const blockText = block.textContent;
-            const textIndex = blockText.indexOf(text);
+            // Second try: text may span multiple nodes (e.g., across inline code)
+            // Build a text-content string that excludes already-highlighted regions
+            const blockText = getUnhighlightedText(block);
+            const textIndex = blockText.text.indexOf(text);
             if (textIndex !== -1) {
-                // Found the text in this block, now find the exact range
-                const range = findTextRange(block, text, textIndex);
+                const range = findTextRangeInMappedNodes(blockText.nodes, text, textIndex);
                 if (range) {
                     highlightComment(range, comment);
-                    return;
+                    return true;
                 }
             }
         }
-
-        console.warn('Could not find text to highlight:', text);
+        return false;
     }
 
     /**
-     * Find a range for the given text within a container element,
-     * handling cases where text spans multiple nodes (e.g., across inline code elements)
+     * Build a concatenated text string from a block's text nodes, skipping
+     * nodes inside existing .comment-highlight spans. Returns the text and
+     * a mapping of character positions to {node, offset} for range creation.
      */
-    function findTextRange(container, searchText, textIndex) {
-        const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null, false);
+    function getUnhighlightedText(block) {
+        const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT, {
+            acceptNode: function (node) {
+                if (node.parentElement && node.parentElement.closest('.comment-highlight')) {
+                    return NodeFilter.FILTER_REJECT;
+                }
+                return NodeFilter.FILTER_ACCEPT;
+            }
+        }, false);
 
-        let currentPos = 0;
-        let startNode = null;
-        let startOffset = 0;
-        let endNode = null;
-        let endOffset = 0;
-
+        let text = '';
+        const nodes = []; // [{node, startPos, endPos}]
         let node;
         while ((node = walker.nextNode())) {
-            const nodeLength = node.textContent.length;
+            const startPos = text.length;
+            text += node.textContent;
+            nodes.push({ node, startPos, endPos: text.length });
+        }
 
-            // Check if this node contains the start of our search text
-            if (startNode === null && currentPos + nodeLength > textIndex) {
-                startNode = node;
-                startOffset = textIndex - currentPos;
+        return { text, nodes };
+    }
+
+    /**
+     * Find a range for text at a given offset in a mapped node list.
+     */
+    function findTextRangeInMappedNodes(nodes, searchText, textIndex) {
+        const searchEnd = textIndex + searchText.length;
+        let startNode = null, startOffset = 0;
+        let endNode = null, endOffset = 0;
+
+        for (const entry of nodes) {
+            if (!startNode && entry.endPos > textIndex) {
+                startNode = entry.node;
+                startOffset = textIndex - entry.startPos;
             }
-
-            // Check if this node contains the end of our search text
-            if (startNode !== null && currentPos + nodeLength >= textIndex + searchText.length) {
-                endNode = node;
-                endOffset = textIndex + searchText.length - currentPos;
+            if (entry.endPos >= searchEnd) {
+                endNode = entry.node;
+                endOffset = searchEnd - entry.startPos;
                 break;
             }
-
-            currentPos += nodeLength;
         }
 
-        if (startNode && endNode) {
-            const range = document.createRange();
-            range.setStart(startNode, startOffset);
-            range.setEnd(endNode, endOffset);
-            return range;
-        }
+        if (!startNode || !endNode) return null;
 
-        return null;
+        const range = document.createRange();
+        range.setStart(startNode, startOffset);
+        range.setEnd(endNode, endOffset);
+        return range;
     }
 
     /**
@@ -1003,6 +1274,7 @@
      * Trigger a page reload
      */
     function triggerReload() {
+        if (window.crNav.editMode) return;
         window.location.reload();
     }
 

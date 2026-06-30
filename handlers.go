@@ -9,7 +9,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -176,11 +178,145 @@ func renderViewer(w http.ResponseWriter, r *http.Request, projectDir, filePath s
 		"FilePath":    filePath,
 		"HTMLContent": template.HTML(html),
 		"Comments":    comments,
+		"Version":     Version,
+		"CommitHash":  CommitHash,
 	}
 
 	if err := templates.ExecuteTemplate(w, "viewer.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+func handleScratchViewer(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	sess := getScratchSession(id)
+	if sess == nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	html, err := RenderMarkdownWithLineNumbers([]byte(sess.Content))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	comments, err := getComments(scratchProjectDir, id, false)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := renderCommentsAsHTML(comments); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	data := map[string]interface{}{
+		"ProjectDir":   scratchProjectDir,
+		"FilePath":     id,
+		"HTMLContent":  template.HTML(html),
+		"Comments":     comments,
+		"Version":      Version,
+		"CommitHash":   CommitHash,
+		"ScratchMode":  true,
+		"ScratchID":    id,
+		"ScratchLabel": sess.Label,
+	}
+
+	if err := templates.ExecuteTemplate(w, "viewer.html", data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+// handleCreateScratch creates a new scratch session and returns its URL plus ID.
+func handleCreateScratch(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Content string `json:"content"`
+		Label   string `json:"label"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Content == "" {
+		http.Error(w, "content is required", http.StatusBadRequest)
+		return
+	}
+
+	sess, err := createScratchSession(req.Content, req.Label)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	port := os.Getenv("CR_LISTEN_PORT")
+	if port == "" {
+		port = "4779"
+	}
+	resp := map[string]interface{}{
+		"id":  sess.ID,
+		"url": fmt.Sprintf("http://localhost:%s/scratch/%s", port, sess.ID),
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// handleCommitScratch fires the commit signal for a scratch session. The
+// blocking CLI client gets unblocked and receives the rendered output. The
+// browser receives the same rendered text so it can display a confirmation.
+func handleCommitScratch(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	rendered, err := commitScratchSession(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"status":   "committed",
+		"rendered": rendered,
+	})
+}
+
+// handleAwaitScratch long-polls for the session to be committed. The CLI uses
+// this to block until the browser ⌘↩ trigger fires. Default timeout 60s; the
+// CLI loops as needed.
+func handleAwaitScratch(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if getScratchSession(id) == nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	timeout := 60 * time.Second
+	if t := r.URL.Query().Get("timeout"); t != "" {
+		if secs, err := strconv.Atoi(t); err == nil && secs > 0 {
+			timeout = time.Duration(secs) * time.Second
+		}
+	}
+
+	rendered, ok := waitForScratchCommit(id, timeout)
+	w.Header().Set("Content-Type", "application/json")
+	if !ok {
+		w.WriteHeader(http.StatusRequestTimeout)
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "timeout"})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"status":   "committed",
+		"rendered": rendered,
+	})
+}
+
+// handleDeleteScratch removes a scratch session and its comments. Called by
+// the CLI after the rendered output is delivered, so the daemon doesn't
+// accumulate ephemeral data.
+func handleDeleteScratch(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	_, _ = deleteAllComments(scratchProjectDir, id)
+	deleteScratchSession(id)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
 }
 
 var skipDirs = map[string]bool{
@@ -324,9 +460,20 @@ func handleCreateComment(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if comment.CommentText == "" {
+	// CommentText is required EXCEPT for quick-reaction verbs (agree/reject)
+	// which carry meaning even without free-form text.
+	if comment.CommentText == "" && comment.Verb != "agree" && comment.Verb != "reject" {
 		http.Error(w, "comment_text is required", http.StatusBadRequest)
 		return
+	}
+
+	if comment.Verb != "" {
+		switch comment.Verb {
+		case "agree", "reject", "question", "comment":
+		default:
+			http.Error(w, "verb must be one of agree|reject|question|comment", http.StatusBadRequest)
+			return
+		}
 	}
 
 	// Default author to 'user' if not provided (for API calls from web UI)
@@ -471,4 +618,118 @@ func handleResolveThread(w http.ResponseWriter, r *http.Request) {
 	}); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+func validateContentPath(projectDir, filePath string) (string, error) {
+	projects, err := getAllProjects()
+	if err != nil {
+		return "", fmt.Errorf("failed to get projects: %w", err)
+	}
+
+	found := false
+	for _, p := range projects {
+		if p.Directory == projectDir {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return "", fmt.Errorf("project not registered: %s", projectDir)
+	}
+
+	absPath := filepath.Clean(filepath.Join(projectDir, filePath))
+	if !strings.HasPrefix(absPath, filepath.Clean(projectDir)+string(filepath.Separator)) {
+		return "", fmt.Errorf("path traversal rejected")
+	}
+
+	return absPath, nil
+}
+
+func handleGetContent(w http.ResponseWriter, r *http.Request) {
+	projectDir := r.URL.Query().Get("project_directory")
+	filePath := r.URL.Query().Get("file_path")
+
+	if projectDir == "" || filePath == "" {
+		http.Error(w, "project_directory and file_path are required", http.StatusBadRequest)
+		return
+	}
+
+	absPath, err := validateContentPath(projectDir, filePath)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	content, err := os.ReadFile(absPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			http.Error(w, "file not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write(content)
+}
+
+// AnchorUpdate represents a comment position update from the frontend's
+// invisible anchor system. When the editor extracts anchor positions on save,
+// it sends these updates so we can precisely reposition comments.
+type AnchorUpdate struct {
+	CommentID    int    `json:"comment_id"`
+	SelectedText string `json:"selected_text"`
+}
+
+func handleSaveContent(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ProjectDirectory string         `json:"project_directory"`
+		FilePath         string         `json:"file_path"`
+		Content          string         `json:"content"`
+		AnchorUpdates    []AnchorUpdate `json:"anchor_updates"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.ProjectDirectory == "" || req.FilePath == "" {
+		http.Error(w, "project_directory and file_path are required", http.StatusBadRequest)
+		return
+	}
+
+	absPath, err := validateContentPath(req.ProjectDirectory, req.FilePath)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Read old content before overwriting (for comment re-anchoring)
+	oldContent, _ := os.ReadFile(absPath)
+
+	// Suppress the file watcher reload for our own save, and update the
+	// content snapshot so future external-change diffs have the right baseline.
+	if fileWatcher != nil {
+		fileWatcher.SuppressNext(absPath)
+		fileWatcher.UpdateContentSnapshot(absPath, req.Content)
+	}
+
+	if err := os.WriteFile(absPath, []byte(req.Content), 0644); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Re-anchor comments: use anchor-based updates from the rich editor when
+	// available (precise), fall back to diff-based reanchoring (for raw mode
+	// or when no anchors were sent).
+	if len(req.AnchorUpdates) > 0 {
+		applyAnchorUpdates(req.ProjectDirectory, req.FilePath, req.Content, req.AnchorUpdates)
+	} else if len(oldContent) > 0 {
+		reanchorComments(req.ProjectDirectory, req.FilePath, string(oldContent), req.Content)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "saved"})
 }

@@ -275,6 +275,22 @@ func (env *TestEnv) patchJSON(t *testing.T, path string, data interface{}) *http
 	return resp
 }
 
+func (env *TestEnv) putJSON(t *testing.T, path string, data interface{}) *http.Response {
+	t.Helper()
+
+	jsonData, err := json.Marshal(data)
+	require.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodPut, env.BaseURL+path, bytes.NewReader(jsonData))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+
+	return resp
+}
+
 func (env *TestEnv) delete(t *testing.T, path string) *http.Response {
 	t.Helper()
 
@@ -484,8 +500,11 @@ func TestE2E_WebInterface_FileViewer(t *testing.T) {
 	assert.Contains(t, bodyStr, "data-line-start", "Should have line number attributes")
 	assert.Contains(t, bodyStr, "data-line-end", "Should have line number attributes")
 
-	// Check viewer.js is loaded
+	// Check all JS modules are loaded
 	assert.Contains(t, bodyStr, "viewer.js")
+	assert.Contains(t, bodyStr, "keyboard-nav.js")
+	assert.Contains(t, bodyStr, "selection.js")
+	assert.Contains(t, bodyStr, "keyboard-comments.js")
 }
 
 func TestE2E_WebInterface_DirectoryListing(t *testing.T) {
