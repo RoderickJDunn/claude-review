@@ -166,12 +166,19 @@ func runServer() {
 	// Start scratch garbage collector
 	startScratchGC()
 
-	// Static files from embedded FS
+	// Static files from embedded FS. embed.FS reports a zero modification
+	// time for every file, so browsers happily reuse cached copies even
+	// after the daemon binary is updated — forcing no-store eliminates the
+	// stale-frontend trap.
 	staticSubFS, err := fs.Sub(staticFS, "frontend/static")
 	if err != nil {
 		log.Fatalf("Failed to create static sub-filesystem: %v", err)
 	}
-	r.Handle("/static/*", http.StripPrefix("/static/", http.FileServer(http.FS(staticSubFS))))
+	staticHandler := http.StripPrefix("/static/", http.FileServer(http.FS(staticSubFS)))
+	r.Handle("/static/*", http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Cache-Control", "no-store, must-revalidate")
+		staticHandler.ServeHTTP(w, req)
+	}))
 
 	// Start server
 	port := os.Getenv("CR_LISTEN_PORT")
