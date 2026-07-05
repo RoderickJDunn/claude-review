@@ -66,6 +66,12 @@ func runAnnotateClipboard() {
 // current Claude Code session's JSONL transcript and pipes it through the
 // scratch flow, writing the rendered annotation to stdout (so the /annotate
 // slash command can capture it).
+//
+// With --resume <id>, it skips the transcript scan and the session-creation
+// step entirely: the session is already live in the daemon (created by a
+// previous /annotate invocation that pressed Send & Continue). We just
+// attach to that session's long-poll channel and print the next commit's
+// rendered payload — no new browser tab, no daemon banner.
 func runAnnotateSession() {
 	cmd := flag.NewFlagSet("annotate-session", flag.ExitOnError)
 	sessionID := cmd.String("session-id", "", "Claude Code session UUID (auto-detected from newest JSONL if omitted)")
@@ -73,30 +79,66 @@ func runAnnotateSession() {
 	label := cmd.String("label", "Response from Claude Code", "Optional label shown in the browser breadcrumb")
 	noOpen := cmd.Bool("no-open", false, "Don't auto-open the browser")
 	timeoutSecs := cmd.Int("timeout", 0, "Give up waiting for commit after N seconds (0 = wait forever)")
+	resume := cmd.String("resume", "", "Attach to an existing scratch session ID instead of creating a new one")
+	fromFile := cmd.String("from-file", "", "Read content from this file instead of the Claude Code transcript (used by /annotate to survive /rewind)")
 
 	if err := cmd.Parse(os.Args[2:]); err != nil {
 		log.Fatalf("Failed to parse flags: %v", err)
 	}
 
-	if *projectDir == "" {
-		cwd, err := os.Getwd()
-		if err != nil {
-			log.Fatalf("Failed to get current directory: %v", err)
+	// Accept `resume=<id>` as a positional argument for slash-command
+	// ergonomics — the /annotate command just interpolates $ARGUMENTS
+	// verbatim, so this lets `/annotate resume=abcd` work without wrapping.
+	if *resume == "" {
+		for _, arg := range cmd.Args() {
+			if strings.HasPrefix(arg, "resume=") {
+				*resume = strings.TrimPrefix(arg, "resume=")
+				break
+			}
 		}
-		*projectDir = cwd
 	}
 
-	transcript, err := resolveTranscriptPath(*projectDir, *sessionID)
-	if err != nil {
-		log.Fatalf("%v", err)
+	if *resume != "" {
+		if err := runScratchResume(*resume, *timeoutSecs); err != nil {
+			log.Fatalf("%v", err)
+		}
+		return
 	}
 
-	content, err := extractLastAssistantMessage(transcript)
-	if err != nil {
-		log.Fatalf("Failed to extract last assistant message: %v", err)
+	var content string
+	if *fromFile != "" {
+		// --from-file path: the model has already resolved its previous
+		// assistant message from its own live context and written it to
+		// disk. Skip the transcript entirely — this is the /rewind-safe
+		// path because the model's context reflects the current live chain
+		// while the .jsonl on disk may still contain rewound-away branches.
+		b, err := os.ReadFile(*fromFile)
+		if err != nil {
+			log.Fatalf("Failed to read --from-file %q: %v", *fromFile, err)
+		}
+		content = string(b)
+	} else {
+		if *projectDir == "" {
+			cwd, err := os.Getwd()
+			if err != nil {
+				log.Fatalf("Failed to get current directory: %v", err)
+			}
+			*projectDir = cwd
+		}
+
+		transcript, err := resolveTranscriptPath(*projectDir, *sessionID)
+		if err != nil {
+			log.Fatalf("%v", err)
+		}
+
+		content, err = extractLastAssistantMessage(transcript)
+		if err != nil {
+			log.Fatalf("Failed to extract last assistant message: %v", err)
+		}
 	}
+
 	if strings.TrimSpace(content) == "" {
-		log.Fatalf("No assistant text found in transcript %s", transcript)
+		log.Fatalf("No assistant text found (transcript or --from-file was empty)")
 	}
 
 	// Pipe content directly through scratch flow → stdout.
@@ -104,6 +146,46 @@ func runAnnotateSession() {
 		true, false, "", *noOpen, *timeoutSecs); err != nil {
 		log.Fatalf("%v", err)
 	}
+}
+
+// runScratchResume attaches to an existing scratch session and waits for its
+// next commit. The session was created (and the browser tab opened) by a
+// previous /annotate invocation that pressed Send & Continue. We're just the
+// consumer for the next event on the same in-memory channel.
+//
+// Nothing goes to the browser here — the browser has been open the whole time
+// and is showing the same threads. Nothing goes to stderr either (no banner,
+// no URL): the point of resume is that Claude Code cycles quietly.
+//
+// Delete-on-exit is gated on keep_alive: if the browser sent Send & Continue
+// again, the session must live on for the next resume cycle; if it sent the
+// single-shot ⌘↩, we're the closing CLI and clean up.
+func runScratchResume(sessionID string, timeoutSecs int) error {
+	if !isServerRunning() {
+		return fmt.Errorf("daemon is not running; can't resume scratch session %s", sessionID)
+	}
+	base := daemonBaseURL()
+
+	rendered, keepAlive, err := awaitCommit(base, sessionID, timeoutSecs)
+	if err != nil {
+		return err
+	}
+
+	if !keepAlive {
+		if req, err := http.NewRequest(http.MethodDelete, base+"/api/scratch/"+sessionID, nil); err == nil {
+			if dresp, derr := http.DefaultClient.Do(req); derr == nil {
+				_ = dresp.Body.Close()
+			}
+		}
+	}
+
+	if _, err := os.Stdout.WriteString(rendered); err != nil {
+		return err
+	}
+	if !strings.HasSuffix(rendered, "\n") {
+		_, _ = os.Stdout.WriteString("\n")
+	}
+	return nil
 }
 
 func runScratchFlow(fromClipboard, fromStdin bool, fromFile, label string,
@@ -218,15 +300,19 @@ func runScratchFlowWithContent(content, label string,
 		_ = openBrowser(created.URL)
 	}
 
-	rendered, err := awaitCommit(base, created.ID, timeoutSecs)
+	rendered, keepAlive, err := awaitCommit(base, created.ID, timeoutSecs)
 	if err != nil {
 		return err
 	}
 
-	// Best-effort cleanup; failure here is non-fatal.
-	if req, err := http.NewRequest(http.MethodDelete, base+"/api/scratch/"+created.ID, nil); err == nil {
-		if dresp, derr := http.DefaultClient.Do(req); derr == nil {
-			_ = dresp.Body.Close()
+	// Best-effort cleanup; failure here is non-fatal. Skip when keep_alive is
+	// set — the browser is still open and a follow-up /annotate resume=<id>
+	// invocation from Claude Code will attach to the same session.
+	if !keepAlive {
+		if req, err := http.NewRequest(http.MethodDelete, base+"/api/scratch/"+created.ID, nil); err == nil {
+			if dresp, derr := http.DefaultClient.Do(req); derr == nil {
+				_ = dresp.Body.Close()
+			}
 		}
 	}
 
@@ -254,7 +340,7 @@ func runScratchFlowWithContent(content, label string,
 	return nil
 }
 
-func awaitCommit(base, id string, timeoutSecs int) (string, error) {
+func awaitCommit(base, id string, timeoutSecs int) (string, bool, error) {
 	deadline := time.Time{}
 	if timeoutSecs > 0 {
 		deadline = time.Now().Add(time.Duration(timeoutSecs) * time.Second)
@@ -267,7 +353,7 @@ func awaitCommit(base, id string, timeoutSecs int) (string, error) {
 		if timeoutSecs > 0 {
 			remaining := int(time.Until(deadline).Seconds())
 			if remaining <= 0 {
-				return "", fmt.Errorf("scratch session %s: timed out waiting for commit", id)
+				return "", false, fmt.Errorf("scratch session %s: timed out waiting for commit", id)
 			}
 			if remaining < chunk {
 				chunk = remaining
@@ -278,7 +364,7 @@ func awaitCommit(base, id string, timeoutSecs int) (string, error) {
 		client := &http.Client{Timeout: time.Duration(chunk+5) * time.Second}
 		resp, err := client.Get(url)
 		if err != nil {
-			return "", fmt.Errorf("await scratch commit: %w", err)
+			return "", false, fmt.Errorf("await scratch commit: %w", err)
 		}
 		body, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
@@ -286,19 +372,20 @@ func awaitCommit(base, id string, timeoutSecs int) (string, error) {
 		switch resp.StatusCode {
 		case http.StatusOK:
 			var data struct {
-				Rendered string `json:"rendered"`
+				Rendered  string `json:"rendered"`
+				KeepAlive bool   `json:"keep_alive"`
 			}
 			if err := json.Unmarshal(body, &data); err != nil {
-				return "", fmt.Errorf("decode commit response: %w", err)
+				return "", false, fmt.Errorf("decode commit response: %w", err)
 			}
-			return data.Rendered, nil
+			return data.Rendered, data.KeepAlive, nil
 		case http.StatusRequestTimeout:
 			// daemon returned without commit — loop again (or exit if deadline hit)
 			continue
 		case http.StatusNotFound:
-			return "", fmt.Errorf("scratch session %s vanished from daemon", id)
+			return "", false, fmt.Errorf("scratch session %s vanished from daemon", id)
 		default:
-			return "", fmt.Errorf("await scratch commit: %s: %s", resp.Status, string(body))
+			return "", false, fmt.Errorf("await scratch commit: %s: %s", resp.Status, string(body))
 		}
 	}
 }

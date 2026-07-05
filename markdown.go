@@ -410,6 +410,127 @@ func intOrZero(p *int) int {
 	return *p
 }
 
+// RenderThreadsToDirective returns the thread-reply directive that Claude
+// Code interprets when the user presses ⌥↩ ("Send & Continue") in the browser.
+// Instead of the single-shot chat blob, each thread is emitted with its ID so
+// the agent can call `claude-review reply --comment-id N` per thread and let
+// the browser display replies inline via SSE. When threads is empty, a
+// no-op directive is emitted that just tells the agent to loop back into
+// /annotate resume=<sessionID>.
+func RenderThreadsToDirective(sessionID string, threads [][]Comment) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "You have unread annotations from the user in claude-review scratch session `%s`.\n\n", sessionID)
+	if len(threads) == 0 {
+		b.WriteString("Nothing new since last sync; no per-thread replies needed.\n\n")
+		fmt.Fprintf(&b, "Invoke `/annotate resume=%s` to keep the review open for the next round.\n", sessionID)
+		return b.String()
+	}
+
+	b.WriteString("Reply to each thread individually with:\n")
+	b.WriteString("    claude-review reply --comment-id <ID> --message \"<your reply>\"\n\n")
+	b.WriteString("Do NOT respond in the terminal chat — the browser is the source of truth; the\n")
+	b.WriteString("user is watching threads populate live via SSE.\n\n")
+	b.WriteString("Threads awaiting your reply:\n\n")
+
+	for i, thread := range threads {
+		if len(thread) == 0 {
+			continue
+		}
+		root := thread[0]
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		fmt.Fprintf(&b, "─── thread %d ──────────────────────────────────────────────\n", root.ID)
+		b.WriteString(renderDirectiveThreadBody(thread))
+	}
+
+	b.WriteString("\n")
+	fmt.Fprintf(&b, "When all thread replies are posted, invoke `/annotate resume=%s` to\n", sessionID)
+	b.WriteString("keep the review open for the next round.\n")
+	return b.String()
+}
+
+// renderDirectiveThreadBody emits the Selection: quote followed by the most
+// recent user message in the thread. Prior user messages have already been
+// forwarded on earlier rounds, so we only surface what's new. The intro
+// ("User said:" / "User asked:") is verb-aware so the agent has a hint about
+// tone before it drafts a reply.
+func renderDirectiveThreadBody(thread []Comment) string {
+	root := thread[0]
+
+	var b strings.Builder
+	b.WriteString("Selection:\n")
+
+	ranges := []chatRange{}
+	if root.SelectedText != "" {
+		ranges = append(ranges, chatRange{
+			lineStart:    intOrZero(root.LineStart),
+			lineEnd:      intOrZero(root.LineEnd),
+			selectedText: root.SelectedText,
+		})
+	}
+	if root.ExtraRanges != "" {
+		var extras []ExtraRange
+		if err := json.Unmarshal([]byte(root.ExtraRanges), &extras); err == nil {
+			for _, e := range extras {
+				ranges = append(ranges, chatRange{
+					lineStart:    e.LineStart,
+					lineEnd:      e.LineEnd,
+					selectedText: e.SelectedText,
+				})
+			}
+		}
+	}
+	for i, r := range ranges {
+		if i > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(renderQuotedRange(r.selectedText))
+	}
+	if len(ranges) > 0 {
+		b.WriteString("\n")
+	}
+
+	// Find the most recent user message: prefer the last user-authored
+	// reply, else fall back to the root itself.
+	var latest *Comment
+	for i := len(thread) - 1; i >= 0; i-- {
+		if thread[i].Author == "user" {
+			c := thread[i]
+			latest = &c
+			break
+		}
+	}
+	if latest == nil {
+		// Should not happen — the delta filter guarantees at least one
+		// user comment — but guard anyway.
+		latest = &root
+	}
+
+	verb := ""
+	if latest.ID == root.ID {
+		verb = root.Verb
+	}
+	body := strings.TrimSpace(latest.CommentText)
+
+	intro := "User said:"
+	switch verb {
+	case "question":
+		intro = "User asked:"
+	case "reject":
+		intro = "User rejected:"
+	case "agree":
+		intro = "User agreed:"
+	}
+
+	rendered := renderVerbResponse(verb, body)
+	if rendered == "" {
+		rendered = body
+	}
+	fmt.Fprintf(&b, "%s %s\n", intro, rendered)
+	return b.String()
+}
+
 // RenderMarkdown renders markdown to HTML without line number attributes
 func RenderMarkdown(source []byte) ([]byte, error) {
 	md := goldmark.New(

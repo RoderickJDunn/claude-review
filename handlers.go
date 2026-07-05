@@ -264,23 +264,39 @@ func handleCreateScratch(w http.ResponseWriter, r *http.Request) {
 // handleCommitScratch fires the commit signal for a scratch session. The
 // blocking CLI client gets unblocked and receives the rendered output. The
 // browser receives the same rendered text so it can display a confirmation.
+// The optional {keep_alive:true} body flips the session into thread-reply
+// mode: the session outlives this commit, the rendered payload is a
+// directive rather than a chat blob, and only the user comments not yet
+// forwarded are included.
 func handleCommitScratch(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	rendered, err := commitScratchSession(id)
+
+	var req struct {
+		KeepAlive bool `json:"keep_alive"`
+	}
+	if r.Body != nil {
+		// Missing / malformed body → keep_alive=false, matching the pre-flag
+		// behaviour where callers just POST an empty payload.
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
+
+	rendered, err := commitScratchSession(id, req.KeepAlive)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{
-		"status":   "committed",
-		"rendered": rendered,
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":     "committed",
+		"rendered":   rendered,
+		"keep_alive": req.KeepAlive,
 	})
 }
 
 // handleAwaitScratch long-polls for the session to be committed. The CLI uses
-// this to block until the browser ⌘↩ trigger fires. Default timeout 60s; the
-// CLI loops as needed.
+// this to block until the browser fires a commit. Default timeout 60s; the
+// CLI loops as needed. The response includes keep_alive so the CLI knows
+// whether to exit for good (single-shot) or hand off to a resume cycle.
 func handleAwaitScratch(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if getScratchSession(id) == nil {
@@ -295,16 +311,17 @@ func handleAwaitScratch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	rendered, ok := waitForScratchCommit(id, timeout)
+	rendered, keepAlive, ok := waitForScratchCommit(id, timeout)
 	w.Header().Set("Content-Type", "application/json")
 	if !ok {
 		w.WriteHeader(http.StatusRequestTimeout)
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "timeout"})
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]string{
-		"status":   "committed",
-		"rendered": rendered,
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":     "committed",
+		"rendered":   rendered,
+		"keep_alive": keepAlive,
 	})
 }
 

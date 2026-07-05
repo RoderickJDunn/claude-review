@@ -54,12 +54,25 @@
 
     function wireSendButton() {
         const btn = document.getElementById('scratch-send-btn');
-        if (!btn) return;
-        btn.addEventListener('click', commitAndClose);
+        if (btn) btn.addEventListener('click', () => commitAndClose(false));
+        const contBtn = document.getElementById('scratch-send-continue-btn');
+        if (contBtn) contBtn.addEventListener('click', () => commitAndClose(true));
     }
 
     function handleAnnotateKey(e) {
         if (!inScratchMode()) return;
+
+        // ⌥↩ commits in Send & Continue mode: agent replies in-thread and
+        // the browser stays open for the next round. Checked before ⌘↩
+        // because Alt+Meta+Enter should still be treated as ⌥↩.
+        if (e.key === 'Enter' && e.altKey) {
+            const popup = document.getElementById('comment-popup');
+            if (popup && popup.style.display === 'block') return;
+            e.preventDefault();
+            e.stopPropagation();
+            setTimeout(() => commitAndClose(true), 0);
+            return;
+        }
 
         // ⌘↩ / Ctrl↩ commits regardless of focus context.
         if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
@@ -69,7 +82,7 @@
             e.stopPropagation();
             // Defer one tick so any pending click handler on the focused
             // element doesn't race with our commit POST.
-            setTimeout(commitAndClose, 0);
+            setTimeout(() => commitAndClose(false), 0);
             return;
         }
 
@@ -473,21 +486,36 @@
         }, 30000);
     }
 
-    async function commitAndClose() {
+    async function commitAndClose(keepAlive = false) {
         const scratchId = window.crScratch && window.crScratch.id;
         if (!scratchId) return;
+
+        const sendBtn = document.getElementById('scratch-send-btn');
+        const contBtn = document.getElementById('scratch-send-continue-btn');
+        if (sendBtn) sendBtn.disabled = true;
+        if (contBtn) contBtn.disabled = true;
 
         try {
             const resp = await fetch(`/api/scratch/${scratchId}/commit`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: '{}',
+                body: JSON.stringify({ keep_alive: !!keepAlive }),
             });
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const data = await resp.json();
-            showCommittedPanel(data.rendered || '');
+            if (data.keep_alive) {
+                // Re-arm both buttons so the user can send another round once
+                // the agent's replies land in-thread (via SSE).
+                if (sendBtn) sendBtn.disabled = false;
+                if (contBtn) contBtn.disabled = false;
+                announce('Sent — waiting for agent replies…');
+            } else {
+                showCommittedPanel(data.rendered || '');
+            }
         } catch (err) {
             console.error('Failed to commit annotation:', err);
+            if (sendBtn) sendBtn.disabled = false;
+            if (contBtn) contBtn.disabled = false;
             alert('Failed to commit annotation. See console.');
         }
     }
@@ -511,6 +539,8 @@
         }
         const sendBtn = document.getElementById('scratch-send-btn');
         if (sendBtn) sendBtn.disabled = true;
+        const contBtn = document.getElementById('scratch-send-continue-btn');
+        if (contBtn) contBtn.disabled = true;
     }
 
     function announce(msg) {

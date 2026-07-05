@@ -38,6 +38,7 @@
                 ['?', 'Question — opens popup with verb pre-set'],
                 ['m', 'Stage current selection for multi-select'],
                 ['⌘↩ / Ctrl↩', 'Send all annotations to the agent'],
+                ['⌥↩ / Alt↩', 'Send annotations and stay in the browser — agent replies in each thread'],
                 ['Esc', 'Clear staged selections'],
             ],
         },

@@ -182,6 +182,180 @@ func TestRenderThreadsToChat_Empty(t *testing.T) {
 	}
 }
 
+func TestRenderThreadsToDirective_SingleThread(t *testing.T) {
+	ls, le := 3, 3
+	threads := [][]Comment{
+		{{
+			ID:           42,
+			LineStart:    &ls,
+			LineEnd:      &le,
+			SelectedText: "the architecture is solid",
+			Author:       "user",
+			Verb:         "agree",
+			CommentText:  "",
+		}},
+	}
+	got := RenderThreadsToDirective("sess-abc", threads)
+
+	for _, want := range []string{
+		"claude-review scratch session `sess-abc`",
+		"─── thread 42 ",
+		"Selection:",
+		"> the architecture is solid",
+		"User agreed: Agreed.",
+		"claude-review reply --comment-id",
+		"/annotate resume=sess-abc",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("directive missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestRenderThreadsToDirective_MultiThreadTruncation(t *testing.T) {
+	ls, le := 1, 20
+	long := strings.Repeat("this is a long line of content\n", 10)
+	l2, e2 := 30, 30
+	threads := [][]Comment{
+		{{
+			ID:           5,
+			LineStart:    &ls,
+			LineEnd:      &le,
+			SelectedText: long,
+			Author:       "user",
+			Verb:         "question",
+			CommentText:  "why?",
+		}},
+		{{
+			ID:           6,
+			LineStart:    &l2,
+			LineEnd:      &e2,
+			SelectedText: "short",
+			Author:       "user",
+			Verb:         "reject",
+			CommentText:  "no thanks",
+		}},
+	}
+	got := RenderThreadsToDirective("sess-xyz", threads)
+
+	if !strings.Contains(got, "─── thread 5 ") {
+		t.Fatalf("missing thread 5 header:\n%s", got)
+	}
+	if !strings.Contains(got, "─── thread 6 ") {
+		t.Fatalf("missing thread 6 header:\n%s", got)
+	}
+	if !strings.Contains(got, "> …") {
+		t.Fatalf("expected ellipsis in truncated long selection:\n%s", got)
+	}
+	if !strings.Contains(got, "User asked: Q: why?") {
+		t.Fatalf("expected question intro:\n%s", got)
+	}
+	if !strings.Contains(got, "User rejected: Skip. no thanks") {
+		t.Fatalf("expected reject intro:\n%s", got)
+	}
+}
+
+func TestRenderThreadsToDirective_EmptyDelta(t *testing.T) {
+	got := RenderThreadsToDirective("sess-empty", nil)
+	if !strings.Contains(got, "Nothing new since last sync") {
+		t.Fatalf("expected empty-delta message:\n%s", got)
+	}
+	if !strings.Contains(got, "/annotate resume=sess-empty") {
+		t.Fatalf("expected resume instruction:\n%s", got)
+	}
+	if strings.Contains(got, "─── thread") {
+		t.Fatalf("did not expect any thread header for empty delta:\n%s", got)
+	}
+}
+
+func TestRenderThreadsToDirective_UsesLatestUserReply(t *testing.T) {
+	// A thread whose most recent user comment is a reply, not the root.
+	// The directive should surface the reply text — the root text and any
+	// agent replies in between are noise the agent has already seen.
+	ls, le := 1, 1
+	rootID := 100
+	threads := [][]Comment{
+		{
+			{
+				ID:           100,
+				LineStart:    &ls,
+				LineEnd:      &le,
+				SelectedText: "some bullet",
+				Author:       "user",
+				Verb:         "question",
+				CommentText:  "why?",
+			},
+			{
+				ID:          101,
+				Author:      "agent",
+				CommentText: "because Y",
+				RootID:      &rootID,
+			},
+			{
+				ID:          102,
+				Author:      "user",
+				CommentText: "but what about Z?",
+				RootID:      &rootID,
+			},
+		},
+	}
+	got := RenderThreadsToDirective("sess-thread", threads)
+	if !strings.Contains(got, "User said: but what about Z?") {
+		t.Fatalf("expected latest user reply text:\n%s", got)
+	}
+	// The root's original question text shouldn't be the intro line — the
+	// agent has already replied to it.
+	if strings.Contains(got, "User asked: Q: why?") {
+		t.Fatalf("root question text should not reappear once replied to:\n%s", got)
+	}
+}
+
+func TestComputeUserCommentDelta(t *testing.T) {
+	rootID := 10
+	threads := [][]Comment{
+		{
+			{ID: 10, Author: "user", CommentText: "one"},
+			{ID: 11, Author: "agent", CommentText: "ack", RootID: &rootID},
+		},
+		{
+			{ID: 20, Author: "user", CommentText: "two"},
+		},
+	}
+
+	// Round 1: nothing sent yet → both threads in delta.
+	sent := map[int64]struct{}{}
+	got, newlySent := computeUserCommentDelta(threads, sent)
+	if len(got) != 2 {
+		t.Fatalf("round 1 expected 2 threads, got %d", len(got))
+	}
+	if len(newlySent) != 2 {
+		t.Fatalf("round 1 expected 2 newly-sent user comments, got %d", len(newlySent))
+	}
+
+	// Mark them sent, then re-run: no new user comments → empty delta.
+	for _, id := range newlySent {
+		sent[id] = struct{}{}
+	}
+	got, newlySent = computeUserCommentDelta(threads, sent)
+	if len(got) != 0 || len(newlySent) != 0 {
+		t.Fatalf("round 2 expected empty delta, got %d threads / %d ids", len(got), len(newlySent))
+	}
+
+	// Add a user reply to thread 1 → only that thread appears in the delta.
+	replyRoot := 10
+	threads[0] = append(threads[0], Comment{ID: 12, Author: "user", CommentText: "follow up", RootID: &replyRoot})
+	got, newlySent = computeUserCommentDelta(threads, sent)
+	if len(got) != 1 {
+		t.Fatalf("round 3 expected 1 thread, got %d", len(got))
+	}
+	if got[0][0].ID != 10 {
+		t.Fatalf("round 3 expected thread rooted at 10, got %d", got[0][0].ID)
+	}
+	if len(newlySent) != 1 || newlySent[0] != 12 {
+		t.Fatalf("round 3 expected id 12 in newlySent, got %v", newlySent)
+	}
+}
+
 func TestHTMLEscapingInCodeBlocks(t *testing.T) {
 	tests := []struct {
 		name     string

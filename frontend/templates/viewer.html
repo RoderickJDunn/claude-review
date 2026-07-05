@@ -15,6 +15,7 @@
             {{if .ScratchMode}}
                 <span class="scratch-label">Annotate: {{if .ScratchLabel}}{{.ScratchLabel}}{{else}}scratch buffer{{end}}</span>
                 <button id="scratch-send-btn" class="comment-btn comment-btn-primary" title="Send to agent (⌘↩)">Send to agent ⌘↩</button>
+                <button id="scratch-send-continue-btn" class="comment-btn" title="Send annotations and keep the browser open — agent will reply in each thread (⌥↩)">Send &amp; Continue ⌥↩</button>
             {{else}}
                 <a href="/">Home</a>
                 <span class="breadcrumb-separator">›</span>
